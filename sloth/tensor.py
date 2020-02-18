@@ -3,30 +3,69 @@ import jax
 import jax.numpy as np
 
 
+class leg:
+    """
+    It is mutable though
+
+    Maybe make it indexable for the symmetry sectors.
+    Maybe give with it also the dimension.
+    """
+    def __init__(self, begin, end):
+        self._begin = begin
+        self._end = end
+
+    @property
+    def begin(self):
+        """I do not want people to foefel with this
+        """
+        return self._begin
+
+    @property
+    def end(self):
+        """I do not want people themselves to foefel with this
+        """
+        return self._end
+
+    @property
+    def internal(self):
+        """Boolean if leg is internal or not
+        """
+        return self.begin == self.end
+
+    def __repr__(self):
+        # This is custom since I do not want that the bond begin or end are
+        # completely expanded if they are Tensors.
+        def default_expr(obj):
+            return f"{str(obj.__class__)[8:-2]} object at {hex(id(obj))}"
+
+        def repr_node(x):
+            return f"<{default_expr(x)}>" if isinstance(x, Tensor) else f"{x}"
+
+        return f"<{default_expr(self)}:" + \
+            f"({repr_node(self.begin)}, {repr_node(self.end)})>"
+
+
 class Tensor:
-    def __init__(self, symmetries, flow=None, indexes=None):
+    """
+    Attrs:
+        couplings: tuple((leg1, leg2, leg3), ...)
+        for the different couplings
+    """
+    _virtual_counter = 0
+
+    def __init__(self, symmetries, flow=None, couplings=None):
         invalids = [i for i in symmetries if i not in _SYMMETRIES]
         if invalids:
             raise ValueError(f'Invalid symmetries inputted: {invalids}')
 
         self.symmetries = symmetries
-        self.flow = flow
-        self.indexes = indexes
+        self.couplings = couplings
         self._data = {}
 
-    # prevent expanding the indices every time
-    _in_repr = False
-
     def __repr__(self):
-        s = f"<{str(self.__class__)[8:-2]} object at {hex(id(self))}>"
-        if not Tensor._in_repr:
-            Tensor._in_repr = True
-            metadata = {k: v for k, v in self.__dict__.items() if k != '_data'}
-            s += f"({metadata})\n"
-            s += ''.join([f"{k}:\n{v}\n" for k, v in self.items()])
-            s += "\n"
-            Tensor._in_repr = False
-        return s
+        d = {k: v for k, v in self.__dict__.items() if k != '_data'}
+        s = f"<{str(self.__class__)[8:-2]} object at {hex(id(self))}:({d})\n"
+        return s + ''.join([f"{k}:\n{v}\n" for k, v in self.items()]) + '>'
 
     def __setitem__(self, index, value):
         self._data[index] = value
@@ -159,5 +198,3 @@ class Tensor:
             # Swap the bond index from self to R
             bond.swap_index(self, R)
         return R
-
-
