@@ -2,7 +2,7 @@ import jax.numpy as np
 from jax import jit
 import h5py
 from sloth.symmetries import _SYMMETRIES
-from sloth.tensor import Tensor
+from sloth.tensor import Tensor, Leg
 
 
 def read_h5(filename):
@@ -11,12 +11,20 @@ def read_h5(filename):
     Returns the root of the network.
     """
     h5file = h5py.File(filename, 'r')
-    sym = tuple(_SYMMETRIES[i] for i in h5file['bookkeeper'].attrs['sgs'])
+    sym = [_SYMMETRIES[i] for i in h5file['bookkeeper'].attrs['sgs']]
 
     sites = h5file['network'].attrs['sites'].item()
-    tensors = [Tensor(sym, flow=((True, True, False),)) for i in range(sites)]
+    tensors = [Tensor(sym) for i in range(sites)]
     bonds = np.array(h5file['network']['bonds']).reshape(-1, 2)
+
+    # make the virtual legs
+    vlegs = [Leg(tensors[x] if x != -1 else 'Vacuum',
+                 tensors[y] if y != -1 else 'Target') for x, y in bonds]
+
+    # make the physical legs for each tensor (or none if virtual tensor)
     sitetoorb = h5file['network']['sitetoorb']
+    bookie = h5file['bookkeeper']
+    plegs = [Leg(f'p{i}', t) for i, t in zip(sitetoorb, tensors) if i != -1]
 
     for tid, A in enumerate(tensors):
         T = h5file['T3NS'][f'tensor_{tid}']
@@ -24,32 +32,20 @@ def read_h5(filename):
         assert T.attrs['sites'][0] == tid
         assert T.attrs['nrblocks'] == len(T['qnumbers'])
 
-        neighbors = [None, None, None]
-        symsecs = [None, None, None]
+        tbonds = [i for i, x in enumerate(bonds[:, 1]) if x == tid] + \
+            ([] if sitetoorb[tid] == -1 else [f'p{sitetoorb[tid]}']) + \
+            [i for i, x in enumerate(bonds[:, 0]) if x == tid]
+        assert len(tbonds) == 3
 
-        for bid, bond in enumerate(bonds):
-            if bond[0] == tid:
-                assert neighbors[2] is None
-                symsecs[2] = h5file['bookkeeper'][f'v_symsec_{bid}']
-                if bond[1] == -1:
-                    neighbors[2] = 'target'
-                else:
-                    neighbors[2] = tensors[bond[1]]
-            if bond[1] == tid:
-                index = 0 if neighbors[0] is None else 1
-                assert neighbors[index] is None
-                symsecs[index] = h5file['bookkeeper'][f'v_symsec_{bid}']
-                if bond[0] == -1:
-                    neighbors[index] = 'vacuum'
-                else:
-                    neighbors[index] = tensors[bond[0]]
+        symsecs = tuple(bookie[f'v_symsec_{i}'] if isinstance(i, int) else
+                        bookie[f'p_symsec_{i[1:]}'] for i in tbonds)
 
-        if sitetoorb[tid] != -1:
-            assert neighbors[1] is None
-            symsecs[1] = h5file['bookkeeper'][f'p_symsec_{sitetoorb[tid]}']
-            neighbors[1] = str(sitetoorb[tid])
+        A.couplings = (tuple(vlegs[i] if isinstance(i, int) else
+                             plegs[int(i[1:])] for i in tbonds),)
 
-        A.indexes = (tuple(neighbors),)
+        # No none's in couplings
+        assert not [i for i in A.couplings[0] if i is None]
+
         # reshaping the irreps bit
         sirr = [np.array(s['irreps']).reshape(
             s.attrs['nrSecs'].item(), -1)[:, :len(sym)] for s in symsecs
