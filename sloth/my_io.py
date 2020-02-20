@@ -18,8 +18,7 @@ def read_h5(filename):
     bonds = np.array(h5file['network']['bonds']).reshape(-1, 2)
 
     # make the virtual legs
-    vlegs = [Leg(tensors[x] if x != -1 else 'Vacuum',
-                 tensors[y] if y != -1 else 'Target') for x, y in bonds]
+    vlegs = [Leg(*[tensors[i] if i != -1 else None for i in x]) for x in bonds]
 
     # make the physical legs for each tensor (or none if virtual tensor)
     sitetoorb = h5file['network']['sitetoorb']
@@ -40,11 +39,11 @@ def read_h5(filename):
         symsecs = tuple(bookie[f'v_symsec_{i}'] if isinstance(i, int) else
                         bookie[f'p_symsec_{i[1:]}'] for i in tbonds)
 
-        A.couplings = (tuple(vlegs[i] if isinstance(i, int) else
-                             plegs[int(i[1:])] for i in tbonds),)
+        A.coupling = tuple(vlegs[i] if isinstance(i, int) else
+                           plegs[int(i[1:])] for i in tbonds)
 
-        # No none's in couplings
-        assert not [i for i in A.couplings[0] if i is None]
+        # No none's in coupling
+        assert not [i for i in A.coupling[0] if i is None]
 
         # reshaping the irreps bit
         sirr = [np.array(s['irreps']).reshape(

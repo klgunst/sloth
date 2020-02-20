@@ -1,12 +1,5 @@
 from sloth.symmetries import _SYMMETRIES
-import jax
 import jax.numpy as np
-import collections
-
-
-class SymKey(np.ndarray):
-    def __hash__(self):
-        hash(self.tostring())
 
 
 class InternalNode():
@@ -66,87 +59,30 @@ class Leg:
         yield self.begin
         yield self.end
 
+    def ingoing(self, obj):
+        if obj != self.begin and obj != self.end:
+            raise ValueError(f'{obj} is not connected to bond')
+        return self.end == obj
 
-class NestedTuple(tuple):
-    """Sentinel is iterable objects that should not be converted in nested
-    tuples.
-    """
-    def __new__(self, a, _init=True):
-        if _init:
-            return NestedTuple(a, _init=False)
-        elif isinstance(a, (list, tuple)):
-            return tuple.__new__(NestedTuple,
-                                 (NestedTuple(ax, _init=False) for ax in a))
-        else:
-            return a
-
-    def flatten(self):
-        """Flattens the NestedTuple to a list.
+    def substitute(self, obj, nobj):
+        """Substitutes the obj in the leg by nobj
         """
-        def yielder(x):
-            for y in x:
-                if isinstance(y, NestedTuple):
-                    yield from yielder(y)
-                else:
-                    yield y
-        return [y for y in yielder(self)]
-
-    def __getitem__(self, index):
-        if isinstance(index, int):
-            return self[[index]]
-        elif not isinstance(index, collections.Iterator):
-            return self[iter(index)]
-        else:
-            i = next(index)
-            if not isinstance(i, int):
-                raise ValueError(f'Only integers for indexing. {i} invalid')
-            inner = tuple.__getitem__(self, i)
-            if isinstance(inner, NestedTuple):
-                try:
-                    return inner[index]
-                except StopIteration:
-                    # indexing ended
-                    return inner
-            else:
-                try:
-                    next(index)
-                    raise ValueError('Bottom of nested tuple reached')
-                except StopIteration:
-                    return inner
-
-    def find(self, obj):
-        """Find the object in the nested tuple and returns its indexes for the
-        first occurence.
-        """
-        for i, x in enumerate(self):
-            if x == obj:
-                return (i,)
-            elif isinstance(x, NestedTuple):
-                result = x.find(obj)
-                if result is not None:
-                    return (i, *result)
-        return None
-
-    def substitute(self, obj, new_obj):
-        """Substitute all occurences of obj with new_obj.
-        """
-        return NestedTuple([
-            NestedTuple(new_obj, _init=False) if x == obj else
-            (x if not isinstance(x, NestedTuple) else
-             x.substitute(obj, new_obj)) for x in self]
-                           )
+        if self.begin == obj:
+            self._begin = nobj
+        if self.end == obj:
+            self._end = nobj
 
 
 class Tensor:
     """
     Attrs:
-        couplings: NestedTuple((leg1, leg2, leg3), ...)
+        coupling: tuple((leg1, leg2, leg3), ...)
         maybe go to ndarray?
-        for the different couplings
+        for the different coupling
 
         sorted list of symmetries
     """
-    def __init__(self, symmetries, couplings=None):
+    def __init__(self, symmetries, coupling=None):
         invalids = [i for i in symmetries if i not in _SYMMETRIES]
         if invalids:
             raise ValueError(f'Invalid symmetries inputted: {invalids}')
@@ -154,33 +90,47 @@ class Tensor:
         symmetries = list(symmetries)
         symmetries.sort(reverse=True)
         self._symmetries = tuple(symmetries)
-        self._couplings = None if couplings is None else \
-            NestedTuple(couplings)
+        self._coupling = None if coupling is None else \
+            tuple(tuple(c) for c in coupling)
         self._data = {}
 
     @property
-    def couplings(self):
-        return self._couplings
+    def coupling(self):
+        return self._coupling
 
-    @couplings.setter
-    def couplings(self, couplings):
-        self._couplings = NestedTuple(couplings)
+    @coupling.setter
+    def coupling(self, coupling):
+        if isinstance(coupling[0], (list, tuple)):
+            if sum([len(c) == 3 for c in coupling]) != len(coupling):
+                raise ValueError('coupling should be an (x, 3) (3) nested '
+                                 f'list/tuple. Not {coupling}.')
+            self._coupling = tuple(tuple(c) for c in coupling)
+        else:
+            if len(coupling) != 3:
+                raise ValueError('coupling should be an (x, 3) or (3) nested'
+                                 f'list/tuple. Not {coupling}.')
+            self._coupling = (tuple(coupling),)
 
     @property
     def symmetries(self):
         return self._symmetries
 
     @property
+    def flattened_coupling(self):
+        return [el for c in self.coupling for el in c]
+
+    @property
     def outerlegs(self):
-        return [x for x in self.couplings.flatten() if not x.internal]
+        return [x for x in self.flattened_coupling if not x.internal]
 
     @property
     def internallegs(self):
-        return [x for x in self.couplings.flatten() if x.internal]
+        return [x for x in self.flattened_coupling if x.internal]
 
     @property
     def neighbours(self):
-        return [x.begin if x.begin != self else x.end for x in self.outerlegs]
+        return list(set(x for leg in self.outerlegs for x in leg
+                        if x != self and isinstance(x, Tensor)))
 
     def __repr__(self):
         d = {k: v for k, v in self.__dict__.items() if k != '_data'}
@@ -206,6 +156,15 @@ class Tensor:
     def size(self):
         return sum([d.size for _, d in self._data.items()])
 
+    def coupling_id(self, bond):
+        """Finds first occurence of bond in the coupling
+        """
+        for i, x in enumerate(self.coupling):
+            for j, y in enumerate(x):
+                if y == bond:
+                    return i, j
+        return None
+
     def connections(self, B):
         """Returns the connections between `Tensor` `self` and `B` and thus if
         they can be contracted along these connections.
@@ -213,18 +172,17 @@ class Tensor:
         if not isinstance(B, Tensor):
             raise TypeError(f'{B} is not of {self.__class__}')
 
-        return [x for x in self.couplings.flatten()
-                if x in B.couplings.flatten()]
+        return [x for x in self.flattened_coupling
+                if x in B.flattened_coupling]
 
-    def swapped_leg(self, oldleg, newleg):
-        """returns a couplings tuple where oldleg in self is swapped with
+    def substituteleg(self, oldleg, newleg):
+        """returns a coupling tuple where oldleg in self is swapped with
         newleg.
         """
-        if oldleg not in self.couplings.flatten():
+        if oldleg not in self.flattened_coupling:
             raise ValueError(f'{oldleg} not a coupling for {self}')
-
-        return tuple(tuple(y if y != oldleg else newleg for y in x)
-                     for x in self.couplings)
+        return tuple(tuple(newleg if x == oldleg else x for x in y) for y in
+                     self.coupling)
 
     def __matmul__(self, B):
         """Trying to completely contract self and B for all matching bonds.
@@ -238,7 +196,8 @@ class Tensor:
     def qr(self, bond):
         """Executes a QR decomposition for one of the bonds.
 
-        This bond can not be an internal bond.
+        This bond can not be an internal bond, no prefactors from symmetry
+        sectors needed.
 
         bond is ingoing:
             R will couple as (old bond, vacuum -> new bond)
@@ -246,67 +205,56 @@ class Tensor:
         bond is outgoing:
             R will couple as (new bond, vacuum -> old bond)
             new bond is Q -> R
+
+        self is appropriately changed
         """
         if bond.internal:
             raise ValueError(f'{bond} is internal.')
 
-        ingoing = bond.end == self
+        ingoing = bond.ingoing(self)
+        i1, i2 = self.coupling_id(bond)
+        f_id = self.flattened_coupling.index(bond)
 
         R = Tensor(self.symmetries)
-        Q = Tensor(self.symmetries)
-        newbond = Leg(R, Q) if ingoing else Leg(Q, R)
-        R.coupling = ((bond, Leg('Vacuum', R), newbond),) if ingoing else \
-            ((newbond, Leg('Vacuum', R), bond),)
-        Q.coupling = self.swapped_leg(bond, newbond)
+        bond.substitute(self, R)
 
-        assert [x == newbond for x in R.connections(Q)] == [True]
+        newbond = Leg(R, self) if ingoing else Leg(self, R)
+        R.coupling = (bond, Leg(None, R), newbond) if ingoing else \
+            (newbond, Leg(None, R), bond)
+        self.coupling = self.substituteleg(bond, newbond)
+        vacuum = (0,) * len(self.symmetries)
 
-        ind = self.index(bond)
-        flat_ind = self.flattened_index(bond)
-        keys = set([k[ind[0]][ind[1]] for k in self])
-        transp = list(range(self.dims))
-        transp.pop(flat_ind)
-        transp.append(flat_ind)
+        assert [x == newbond for x in R.connections(self)] == [True]
+
+        keys = set([k[i1][i2] for k in self])
+        transp = list(range(len(self.outerlegs)))
+        transp.pop(f_id)
+        transp.append(f_id)
         transp = np.array(transp)
-
-        inflow = self.flow[ind[0]][ind[1]]
+        i_transp = np.argsort(transp)
 
         for key in keys:
-            blocks = [k for k in self if k[ind[0]][ind[1]] == key]
+            blocks = [k for k in self if k[i1][i2] == key]
 
-            leading_dim = set(self[k].shape[flat_ind] for k in blocks)
+            leading_dim = set(self[k].shape[f_id] for k in blocks)
             # check if dimension is consistent everywhere
             assert len(leading_dim) == 1
             leading_dim = leading_dim.pop()
 
             size = sum(self[k].size for k in blocks)
             assert size % leading_dim == 0
-            other_dim = size // leading_dim
 
-            A = np.zeros((other_dim, leading_dim))
             # Moving all needed blocks into one matrix
-            indx = 0
-            for block in blocks:
-                AT = np.transpose(self[block], transp).reshape(-1, leading_dim)
-                slice_of_cake = jax.ops.index[indx:AT.shape[0] + indx, :]
-                A = jax.ops.index_update(A, slice_of_cake, AT)
-                indx += AT.shape[0]
+            Aarr = [np.transpose(self[block], transp).reshape(-1, leading_dim)
+                    for block in blocks]
 
-            q, r = np.linalg.qr(A)
-            R[((key, key),)] = r.T if inflow else r
+            Aspl = np.cumsum([r.shape[0] for r in Aarr[:-1]])
+
+            q, r = np.linalg.qr(np.vstack(Aarr))
+            R[((key, vacuum, key),)] = r.T if ingoing else r
 
             # moving back all the blocks into the original tensor
-            indx = 0
-            for block in blocks:
-                oshape = np.array(self[block].shape)[transp]
+            for block, x in zip(blocks, np.split(q, Aspl)):
                 self[block] = np.transpose(
-                    q[indx:np.prod(oshape[:-1]) + indx, :].reshape(oshape),
-                    np.argsort(transp)
-                )
-                indx += AT.shape[0]
-
-        self.swap_index(bond, R)
-        if isinstance(bond, Tensor):
-            # Swap the bond index from self to R
-            bond.swap_index(self, R)
+                    x.reshape(np.array(self[block].shape)[transp]), i_transp)
         return R
