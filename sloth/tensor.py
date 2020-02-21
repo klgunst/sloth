@@ -1,4 +1,4 @@
-from sloth.symmetries import _SYMMETRIES
+from sloth.symmetries import _SYMMETRIES, symswap
 import jax.numpy as np
 
 
@@ -90,7 +90,7 @@ class Tensor:
         symmetries = list(symmetries)
         symmetries.sort(reverse=True)
         self._symmetries = tuple(symmetries)
-        self._coupling = None if coupling is None else \
+        self.coupling = None if coupling is None else \
             tuple(tuple(c) for c in coupling)
         self._data = {}
 
@@ -100,6 +100,10 @@ class Tensor:
 
     @coupling.setter
     def coupling(self, coupling):
+        if coupling is None:
+            self._coupling = None
+            return
+
         if isinstance(coupling[0], (list, tuple)):
             if sum([len(c) == 3 for c in coupling]) != len(coupling):
                 raise ValueError('coupling should be an (x, 3) (3) nested '
@@ -111,26 +115,20 @@ class Tensor:
                                  f'list/tuple. Not {coupling}.')
             self._coupling = (tuple(coupling),)
 
+        self.indexes = [x for c in self.coupling for x in c if not x.internal]
+
     @property
     def symmetries(self):
         return self._symmetries
 
     @property
-    def flattened_coupling(self):
-        return [el for c in self.coupling for el in c]
-
-    @property
-    def outerlegs(self):
-        return [x for x in self.flattened_coupling if not x.internal]
-
-    @property
     def internallegs(self):
-        return [x for x in self.flattened_coupling if x.internal]
+        return [x for c in self.coupling for x in c if x.internal]
 
     @property
     def neighbours(self):
-        return list(set(x for leg in self.outerlegs for x in leg
-                        if x != self and isinstance(x, Tensor)))
+        return list(x for leg in self.indexes for x in leg
+                    if x != self and isinstance(x, Tensor))
 
     def __repr__(self):
         d = {k: v for k, v in self.__dict__.items() if k != '_data'}
@@ -172,17 +170,20 @@ class Tensor:
         if not isinstance(B, Tensor):
             raise TypeError(f'{B} is not of {self.__class__}')
 
-        return [x for x in self.flattened_coupling
-                if x in B.flattened_coupling]
+        return [x for x in self.indexes if x in B.indexes]
 
-    def substituteleg(self, oldleg, newleg):
+    def substitutelegs(self, oldlegs, newlegs):
         """returns a coupling tuple where oldleg in self is swapped with
         newleg.
         """
-        if oldleg not in self.flattened_coupling:
-            raise ValueError(f'{oldleg} not a coupling for {self}')
-        return tuple(tuple(newleg if x == oldleg else x for x in y) for y in
-                     self.coupling)
+        flatc = [el for tpl in self.coupling for el in tpl]
+        for ol in oldlegs:
+            if ol not in flatc:
+                raise ValueError(f'{ol} not a coupling for {self}')
+
+        return tuple(
+            tuple(newlegs[oldlegs.index(x)] if x in oldlegs else x for x in y)
+            for y in self.coupling)
 
     def __matmul__(self, B):
         """Trying to completely contract self and B for all matching bonds.
@@ -191,7 +192,89 @@ class Tensor:
         if not connections:
             raise ValueError(f'No connections found between {self} and {B}')
 
-        raise NotImplementedError
+        return self.contract(B, (connections,) * 2).simplify()
+
+    def contract(self, B, legs):
+        """This function contract legs of two tensors.
+
+        Args:
+            legs: (2,) array_like of `Leg` objects.
+        """
+        if self.symmetries != B.symmetries:
+            raise ValueError('Symmetries of the two tensors not same.')
+
+        if len(legs[0]) != len(legs[1]):
+            raise ValueError('legs should be (2,) array_like')
+
+        for l1, l2 in zip(legs[0], legs[1]):
+            if l1.ingoing(self) == l2.ingoing(B):
+                raise ValueError(
+                    f'Contraction over {l1}, {l2} clashes for the flow')
+
+        ncont = len(legs[0])
+        C = Tensor(self.symmetries)
+        AB = (self, B)
+        fcoup = tuple(T.indexes for T in AB)
+
+        # index for the tensor itself of each leg
+        oid = [[fl.index(el) for el in ll] for fl, ll in zip(fcoup, legs)]
+
+        # coupling index for each leg
+        cid = [[T.coupling_id(el) for el in ll] for T, ll in zip(AB, legs)]
+
+        # equal amount of nodes as pairs of legs
+        inodes = [InternalNode(C) for i in range(ncont)]
+        ilegs = [[Leg(i, T) if l.ingoing(T) else Leg(T, i)
+                  for i, l in zip(inodes, ll)] for ll, T in zip(legs, AB)]
+
+        # Coupling and thus keys for the dictionary are
+        # [self.coupling, B.coupling] appended to each other with the
+        # appropriate legs substituted.
+        C.coupling = tuple(el for T, ll, il in zip(AB, legs, ilegs)
+                           for el in T.substitutelegs(ll, il))
+
+        for x in C.coupling:
+            for y in x:
+                y.substitute(self, C)
+                y.substitute(B, C)
+
+        for Ak, Abl in self.items():
+            Akcid = [Ak[x][y] for x, y in cid[0]]
+            for Bk, Bbl in B.items():
+                if [Bk[x][y] for x, y in cid[1]] == Akcid:
+                    C[(*Ak, *Bk)] = np.tensordot(Abl, Bbl, oid)
+
+        return C
+
+    def coupling_swap(self, cid):
+        """At this moment from a certain coupling I can swap index 1 and 2.
+        """
+        oc = self.coupling[cid]
+        sc = (oc[1], oc[0], oc[2])
+        self._coupling = tuple(sc if i == cid else c for i, c in
+                               enumerate(self.coupling))
+
+        ndata = {}
+        for key in self:
+            ok = key[cid]
+            nk = (ok[1], ok[0], ok[2])
+            nkey = tuple(nk if i == cid else c for i, c in enumerate(key))
+
+            prefactor = np.prod([symswap(ss, [kk[i] for kk in ok], [1, 0, 2])
+                                 for i, ss in enumerate(self.symmetries)])
+
+            ndata[nkey] = self[key] * prefactor
+        self._data = ndata
+
+    def simplify(self):
+        """This function tries to simplify a tensor by changing it's coupling.
+
+        Types of simplifications:
+            * Removes couplings to the vacuum, if the tensor has multiple
+              couplings.
+        """
+        # Remove couplings with vacuum leg in first or second thingy
+        return self
 
     def qr(self, bond):
         """Executes a QR decomposition for one of the bonds.
@@ -213,7 +296,7 @@ class Tensor:
 
         ingoing = bond.ingoing(self)
         i1, i2 = self.coupling_id(bond)
-        f_id = self.flattened_coupling.index(bond)
+        f_id = self.indexes.index(bond)
 
         R = Tensor(self.symmetries)
         bond.substitute(self, R)
@@ -221,13 +304,13 @@ class Tensor:
         newbond = Leg(R, self) if ingoing else Leg(self, R)
         R.coupling = (bond, Leg(None, R), newbond) if ingoing else \
             (newbond, Leg(None, R), bond)
-        self.coupling = self.substituteleg(bond, newbond)
+        self.coupling = self.substitutelegs([bond], [newbond])
         vacuum = (0,) * len(self.symmetries)
 
         assert [x == newbond for x in R.connections(self)] == [True]
 
         keys = set([k[i1][i2] for k in self])
-        transp = list(range(len(self.outerlegs)))
+        transp = list(range(len(self.indexes)))
         transp.pop(f_id)
         transp.append(f_id)
         transp = np.array(transp)
@@ -251,10 +334,21 @@ class Tensor:
             Aspl = np.cumsum([r.shape[0] for r in Aarr[:-1]])
 
             q, r = np.linalg.qr(np.vstack(Aarr))
+            r = np.expand_dims(r, axis=1)
             R[((key, vacuum, key),)] = r.T if ingoing else r
 
             # moving back all the blocks into the original tensor
             for block, x in zip(blocks, np.split(q, Aspl)):
                 self[block] = np.transpose(
                     x.reshape(np.array(self[block].shape)[transp]), i_transp)
+
         return R
+
+    def full_contract(self):
+        """Tries to stupidely contract the tensor with all each neighbours
+        until exhausted.
+        """
+        T = self
+        while T.neighbours:
+            T = T.neighbours[0] @ T
+        return T
