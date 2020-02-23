@@ -1,15 +1,33 @@
+from sloth.tensor import Leg, Tensor
 import jax.numpy as np
 from jax import jit
 import h5py
 from sloth.symmetries import _SYMMETRIES
-from sloth.tensor import Tensor, Leg
+
+
+class TNS:
+    """Class for the TNS.
+
+    Attrs:
+        A dictionary which gives for each leg it's in and out.
+    """
+    def __init__(self):
+        self._legs = {}
+
+    def __setitem__(self, idx, value):
+        self._legs[idx] = value
+
+    def __getitem__(self, idx):
+        return self._legs[idx]
 
 
 def read_h5(filename):
     """This reads a hdf5 file.
 
-    Returns the root of the network.
+    Returns the network.
     """
+    tns = TNS()
+
     h5file = h5py.File(filename, 'r')
     sym = [_SYMMETRIES[i] for i in h5file['bookkeeper'].attrs['sgs']]
 
@@ -18,12 +36,15 @@ def read_h5(filename):
     bonds = np.array(h5file['network']['bonds']).reshape(-1, 2)
 
     # make the virtual legs
-    vlegs = [Leg(*[tensors[i] if i != -1 else None for i in x]) for x in bonds]
+    vlegs = [Leg(x != -1, y != -1 and x != -1, x == -1) for x, y in bonds]
+    plegs = [Leg() for i in range(h5file['network'].attrs['psites'].item())]
+    for vl in vlegs:
+        tns[vl] = [None, None]
+    for i, pl in enumerate(plegs):
+        tns[pl] = [f'p{i}', None]
 
-    # make the physical legs for each tensor (or none if virtual tensor)
     sitetoorb = h5file['network']['sitetoorb']
     bookie = h5file['bookkeeper']
-    plegs = [Leg(f'p{i}', t) for i, t in zip(sitetoorb, tensors) if i != -1]
 
     for tid, A in enumerate(tensors):
         T = h5file['T3NS'][f'tensor_{tid}']
@@ -38,12 +59,12 @@ def read_h5(filename):
 
         symsecs = tuple(bookie[f'v_symsec_{i}'] if isinstance(i, int) else
                         bookie[f'p_symsec_{i[1:]}'] for i in tbonds)
-
-        A.coupling = tuple(vlegs[i] if isinstance(i, int) else
-                           plegs[int(i[1:])] for i in tbonds)
-
-        # No none's in coupling
-        assert not [i for i in A.coupling[0] if i is None]
+        coupl = [vlegs[i] if isinstance(i, int) else
+                 plegs[int(i[1:])] for i in tbonds]
+        A.coupling = [(i, b) for i, b in zip(coupl, [True, True, False])]
+        for x, y in A.coupling[0]:
+            assert tns[x][y] is None
+            tns[x][y] = A
 
         # reshaping the irreps bit
         sirr = [np.array(s['irreps']).reshape(
@@ -71,4 +92,4 @@ def read_h5(filename):
             A[key] = np.array(block['tel'][begin:end]).reshape(shape)
 
     # root of the network
-    return tensors[-1]
+    return tns

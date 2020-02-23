@@ -2,85 +2,44 @@ from sloth.symmetries import _SYMMETRIES, symswap
 import jax.numpy as np
 
 
-class InternalNode():
-    """Internal nodes for big tensors. Needed for the SU(2) symmetry
-    """
-    def __init__(self, tens):
-        if not isinstance(tens, Tensor):
-            raise TypeError(f'{tens} should be off class {Tensor.__name__}')
-        self.tensor = tens
-
-
 class Leg:
+    """Class for the legs of the tensors.
+
+    Attrs:
+        id: The index of the leg
+        These two are only viable for SU(2) tensors.
+            SU2phase: Possible presence of the $(-1)^{j - m}$ phase on the leg.
+            SU2pref: Possible presence of the $[j]$ prefactor on the leg.
     """
-    It is mutable though
-
-    Maybe make it indexable for the symmetry sectors.
-    and iterable
-    Maybe give with it also the dimension.
-    """
-    def __init__(self, begin, end):
-        self._begin = begin
-        self._end = end
+    def __init__(self, SU2phase=False, SU2pref=False, vacuum=False):
+        self._SU2phase, self._SU2pref, self._vacuum = SU2phase, SU2pref, vacuum
 
     @property
-    def begin(self):
-        """I do not want people to foefel with this
-        """
-        return self._begin
+    def SU2phase(self):
+        return self._SU2phase
 
     @property
-    def end(self):
-        """I do not want people themselves to foefel with this
-        """
-        return self._end
+    def SU2pref(self):
+        return self._SU2pref
 
     @property
-    def internal(self):
-        """Boolean if leg is internal or not
-        """
-        return isinstance(self.begin, InternalNode) or \
-            isinstance(self.end, InternalNode)
+    def vacuum(self):
+        return self._vacuum
 
     def __repr__(self):
-        # This is custom since I do not want that the bond begin or end are
-        # completely expanded if they are Tensors.
-        def default_expr(obj):
-            return f"{str(obj.__class__)[8:-2]} object at {hex(id(obj))}"
+        return f"<{str(self.__class__)[8:-2]} object at {hex(id(self))}:" + \
+            f"({self.__dict__})>"
 
-        def repr_node(x):
-            return f"<{default_expr(x)}>" if isinstance(x, Tensor) else f"{x}"
-
-        return f"<{default_expr(self)}:" + \
-            f"({repr_node(self.begin)}, {repr_node(self.end)})>"
-
-    def __iter__(self):
-        # So you can use `in`
-        yield self.begin
-        yield self.end
-
-    def ingoing(self, obj):
-        if obj != self.begin and obj != self.end:
-            raise ValueError(f'{obj} is not connected to bond')
-        return self.end == obj
-
-    def substitute(self, obj, nobj):
-        """Substitutes the obj in the leg by nobj
-        """
-        if self.begin == obj:
-            self._begin = nobj
-        if self.end == obj:
-            self._end = nobj
+    def same(self, leg):
+        return self.SU2phase == leg.SU2phase and self.SU2pref == leg.SU2pref
 
 
 class Tensor:
-    """
-    Attrs:
-        coupling: tuple((leg1, leg2, leg3), ...)
-        maybe go to ndarray?
-        for the different coupling
+    """Class for the symmetry-invariant tensors.
 
-        sorted list of symmetries
+    Attrs:
+        coupling: tuple(((leg1, isin), (leg2, isin), (leg3, isin)), ...)
+        symmetries: List of the symmetries in the tensor.
     """
     def __init__(self, symmetries, coupling=None):
         invalids = [i for i in symmetries if i not in _SYMMETRIES]
@@ -90,45 +49,76 @@ class Tensor:
         symmetries = list(symmetries)
         symmetries.sort(reverse=True)
         self._symmetries = tuple(symmetries)
-        self.coupling = None if coupling is None else \
-            tuple(tuple(c) for c in coupling)
+        self._coupling = None
+        self.coupling = coupling
         self._data = {}
 
     @property
     def coupling(self):
         return self._coupling
 
+    @property
+    def indexes(self):
+        return self._indexes
+
+    @property
+    def internallegs(self):
+        return self._internallegs
+
     @coupling.setter
     def coupling(self, coupling):
         if coupling is None:
             self._coupling = None
+            self._internallegs = None
+            self._indexes = None
             return
 
-        if isinstance(coupling[0], (list, tuple)):
-            if sum([len(c) == 3 for c in coupling]) != len(coupling):
-                raise ValueError('coupling should be an (x, 3) (3) nested '
-                                 f'list/tuple. Not {coupling}.')
-            self._coupling = tuple(tuple(c) for c in coupling)
-        else:
-            if len(coupling) != 3:
-                raise ValueError('coupling should be an (x, 3) or (3) nested'
-                                 f'list/tuple. Not {coupling}.')
-            self._coupling = (tuple(coupling),)
+        if not isinstance(coupling[0][0], (list, tuple)):
+            coupling = (coupling,)
 
-        self.indexes = [x for c in self.coupling for x in c if not x.internal]
+        if sum([len(c) == 3 for c in coupling]) != len(coupling):
+            raise ValueError('coupling should be an (x, 3 * (Leg, bool)) or '
+                             '(3 * (Leg, bool)) nested list/tuple.')
+
+        self._coupling = tuple(tuple(tuple(el) for el in c) for c in coupling)
+
+        for x in (el for c in coupling for el in c):
+            if not (isinstance(x[0], Leg) and isinstance(x[1], bool)):
+                raise ValueError('coupling should be an (x, 3 * (Leg, bool)) '
+                                 'or (3 * (Leg, bool)) nested list/tuple.')
+
+        FIRSTTIME = self._coupling is None
+
+        # First time setting of the coupling
+        if FIRSTTIME:
+            self._indexes = []
+            self._internallegs = []
+
+            flat_c = tuple(el[0] for c in self.coupling for el in c)
+            flat_cnb = tuple(x for x, y in flat_c)
+            for x in set(flat_cnb):
+                occurences = flat_cnb.count(x)
+                if occurences == 1:
+                    self._indexes.append(x)
+                elif occurences == 2:
+                    foc = flat_cnb.index(x)
+                    soc = flat_cnb[foc + 1:].index(x) + foc + 1
+                    if flat_c[foc][1] == flat_c[soc][2]:
+                        raise ValueError('Internal bond is not in-out')
+
+                    self._internallegs.append(x)
+                else:
+                    raise ValueError('Same leg occurs {occurences} times')
+
+    def flowof(self, leg):
+        if leg not in self.indexes:
+            raise ValueError('Leg not an outer leg')
+        x, y = self.coupling_id(leg)
+        return self.coupling[x][y][1]
 
     @property
     def symmetries(self):
         return self._symmetries
-
-    @property
-    def internallegs(self):
-        return [x for c in self.coupling for x in c if x.internal]
-
-    @property
-    def neighbours(self):
-        return list(x for leg in self.indexes for x in leg
-                    if x != self and isinstance(x, Tensor))
 
     def __repr__(self):
         d = {k: v for k, v in self.__dict__.items() if k != '_data'}
@@ -154,36 +144,38 @@ class Tensor:
     def size(self):
         return sum([d.size for _, d in self._data.items()])
 
-    def coupling_id(self, bond):
-        """Finds first occurence of bond in the coupling
+    def coupling_id(self, leg):
+        """Finds first occurence of leg in the coupling
         """
         for i, x in enumerate(self.coupling):
-            for j, y in enumerate(x):
-                if y == bond:
+            for j, (y, _) in enumerate(x):
+                if y == leg:
                     return i, j
         return None
 
     def connections(self, B):
         """Returns the connections between `Tensor` `self` and `B` and thus if
         they can be contracted along these connections.
+
+        It is possible that the flows do not match and an extra vacuum-coupling
+        should be inserted.
         """
         if not isinstance(B, Tensor):
             raise TypeError(f'{B} is not of {self.__class__}')
-
         return [x for x in self.indexes if x in B.indexes]
 
-    def substitutelegs(self, oldlegs, newlegs):
+    def substitutelegs(self, old, new):
         """returns a coupling tuple where oldleg in self is swapped with
         newleg.
         """
-        flatc = [el for tpl in self.coupling for el in tpl]
-        for ol in oldlegs:
+        flatc = [el[0] for tpl in self.coupling for el in tpl]
+        for ol in old:
             if ol not in flatc:
                 raise ValueError(f'{ol} not a coupling for {self}')
 
         return tuple(
-            tuple(newlegs[oldlegs.index(x)] if x in oldlegs else x for x in y)
-            for y in self.coupling)
+            tuple((new[old.index(x)], y) if x in old else (x, y) for x, y in z)
+            for z in self.coupling)
 
     def __matmul__(self, B):
         """Trying to completely contract self and B for all matching bonds.
@@ -206,14 +198,22 @@ class Tensor:
         if len(legs[0]) != len(legs[1]):
             raise ValueError('legs should be (2,) array_like')
 
-        for l1, l2 in zip(legs[0], legs[1]):
-            if l1.ingoing(self) == l2.ingoing(B):
-                raise ValueError(
-                    f'Contraction over {l1}, {l2} clashes for the flow')
-
-        ncont = len(legs[0])
-        C = Tensor(self.symmetries)
         AB = (self, B)
+        if [len(l) for l in legs] != \
+                [sum(lid in T.indexes for lid in l) for l, T in zip(legs, AB)]:
+            raise ValueError('Not all given legs are loose for the tensors.')
+
+        for l1, l2 in zip(legs[0], legs[1]):
+            if self.flowof(l1) == B.flowof(l2):
+                raise ValueError(
+                    f'Contraction over {l1}, {l2} clashes for the flow,'
+                    'I could fix this by automatically inserting a vacuum')
+
+            if not l1.same(l2):
+                raise ValueError('{l1} and {l2} do not have same prefactors on'
+                                 ' it. I could probably fix that myself')
+
+        C = Tensor(self.symmetries)
         fcoup = tuple(T.indexes for T in AB)
 
         # index for the tensor itself of each leg
@@ -222,21 +222,14 @@ class Tensor:
         # coupling index for each leg
         cid = [[T.coupling_id(el) for el in ll] for T, ll in zip(AB, legs)]
 
-        # equal amount of nodes as pairs of legs
-        inodes = [InternalNode(C) for i in range(ncont)]
-        ilegs = [[Leg(i, T) if l.ingoing(T) else Leg(T, i)
-                  for i, l in zip(inodes, ll)] for ll, T in zip(legs, AB)]
+        # equal amount new internal legs as pairs of legs
+        ilegs = [Leg(**l.__dict__) for l in legs[0]]
 
         # Coupling and thus keys for the dictionary are
         # [self.coupling, B.coupling] appended to each other with the
         # appropriate legs substituted.
-        C.coupling = tuple(el for T, ll, il in zip(AB, legs, ilegs)
-                           for el in T.substitutelegs(ll, il))
-
-        for x in C.coupling:
-            for y in x:
-                y.substitute(self, C)
-                y.substitute(B, C)
+        C.coupling = tuple(el for T, ll in zip(AB, legs)
+                           for el in T.substitutelegs(ll, ilegs))
 
         for Ak, Abl in self.items():
             Akcid = [Ak[x][y] for x, y in cid[0]]
@@ -244,26 +237,40 @@ class Tensor:
                 if [Bk[x][y] for x, y in cid[1]] == Akcid:
                     C[(*Ak, *Bk)] = np.tensordot(Abl, Bbl, oid)
 
+        indexes = [list(T.indexes) for T in AB]
+        for ll, indx in zip(AB, indexes):
+            for x in ll:
+                indx.remove(x)
+        # appended
+        index = indexes[0].extend(indexes[1])
+        # Same length
+        assert len(index) == C._indexes
+        assert len(set(index)) == len(C._indexes)
+        assert not [ii for ii in index if ii not in C._indexes]
+
+        C._indexes = index
+
         return C
 
-    def coupling_swap(self, cid):
-        """At this moment from a certain coupling I can swap index 1 and 2.
+    def coupling_swap(self, cid, permute):
+        """
         """
         oc = self.coupling[cid]
-        sc = (oc[1], oc[0], oc[2])
-        self._coupling = tuple(sc if i == cid else c for i, c in
-                               enumerate(self.coupling))
+        sc = tuple(oc[p] for p in permute)
+        self.coupling = tuple(sc if i == cid else c for i, c in
+                              enumerate(self.coupling))
 
         ndata = {}
         for key in self:
             ok = key[cid]
-            nk = (ok[1], ok[0], ok[2])
+            nk = tuple(ok[p] for p in permute)
             nkey = tuple(nk if i == cid else c for i, c in enumerate(key))
 
-            prefactor = np.prod([symswap(ss, [kk[i] for kk in ok], [1, 0, 2])
+            prefactor = np.prod([symswap(ss, [kk[i] for kk in ok], permute)
                                  for i, ss in enumerate(self.symmetries)])
 
-            ndata[nkey] = self[key] * prefactor
+            self[key] *= prefactor
+            ndata[nkey] = self[key]
         self._data = ndata
 
     def simplify(self):
@@ -276,38 +283,40 @@ class Tensor:
         # Remove couplings with vacuum leg in first or second thingy
         return self
 
-    def qr(self, bond):
-        """Executes a QR decomposition for one of the bonds.
+    def qr(self, leg):
+        """Executes a QR decomposition for one of the legs.
 
-        This bond can not be an internal bond, no prefactors from symmetry
+        This leg can not be an internal leg, no prefactors from symmetry
         sectors needed.
 
-        bond is ingoing:
-            R will couple as (old bond, vacuum -> new bond)
-            new bond is R -> Q
-        bond is outgoing:
-            R will couple as (new bond, vacuum -> old bond)
-            new bond is Q -> R
+        leg is ingoing:
+            R will couple as (old leg, vacuum -> new leg)
+            new leg is R -> Q
+        leg is outgoing:
+            R will couple as (new leg, vacuum -> old leg)
+            new leg is Q -> R
 
         self is appropriately changed
         """
-        if bond.internal:
-            raise ValueError(f'{bond} is internal.')
+        if leg in self.internallegs:
+            raise ValueError(f'{leg} is internal.')
 
-        ingoing = bond.ingoing(self)
-        i1, i2 = self.coupling_id(bond)
-        f_id = self.indexes.index(bond)
+        ingoing = self.flowof(leg)
+        i1, i2 = self.coupling_id(leg)
+        f_id = self.indexes.index(leg)
 
         R = Tensor(self.symmetries)
-        bond.substitute(self, R)
+        Q = Tensor(self.symmetries)
 
-        newbond = Leg(R, self) if ingoing else Leg(self, R)
-        R.coupling = (bond, Leg(None, R), newbond) if ingoing else \
-            (newbond, Leg(None, R), bond)
-        self.coupling = self.substitutelegs([bond], [newbond])
+        nleg = Leg(*leg.__dict__) if ingoing else Leg(*leg.__dict__)
+        R.coupling = ((leg, True), (Leg(vacuum=True), True), (nleg, False)) if\
+            ingoing else ((nleg, True), (Leg(vacuum=True), True), (leg, False))
+
+        Q.coupling = self.substitutelegs([leg], [nleg])
+        Q._indexes = tuple(i if i != leg else nleg for i in self._indexes)
         vacuum = (0,) * len(self.symmetries)
 
-        assert [x == newbond for x in R.connections(self)] == [True]
+        assert [x == nleg for x in R.connections(self)] == [True]
 
         keys = set([k[i1][i2] for k in self])
         transp = list(range(len(self.indexes)))
@@ -339,16 +348,7 @@ class Tensor:
 
             # moving back all the blocks into the original tensor
             for block, x in zip(blocks, np.split(q, Aspl)):
-                self[block] = np.transpose(
+                Q[block] = np.transpose(
                     x.reshape(np.array(self[block].shape)[transp]), i_transp)
 
-        return R
-
-    def full_contract(self):
-        """Tries to stupidely contract the tensor with all each neighbours
-        until exhausted.
-        """
-        T = self
-        while T.neighbours:
-            T = T.neighbours[0] @ T
-        return T
+        return Q, R
