@@ -8,19 +8,26 @@ class Leg:
     Attrs:
         id: The index of the leg
         These two are only viable for SU(2) tensors.
-            SU2phase: Possible presence of the $(-1)^{j - m}$ phase on the leg.
-            SU2pref: Possible presence of the $[j]$ prefactor on the leg.
+            phase: Possible presence of the $(-1)^{j - m}$ phase on the leg.
+            pref: Possible presence of the $[j]$ prefactor on the leg.
     """
-    def __init__(self, SU2phase=False, SU2pref=False, vacuum=False):
-        self._SU2phase, self._SU2pref, self._vacuum = SU2phase, SU2pref, vacuum
+    def __init__(self, phase=False, pref=False, vacuum=False, leg=None):
+        if leg is None:
+            self._phase = phase
+            self._pref = pref
+            self._vacuum = vacuum
+        else:
+            self._phase = leg.phase
+            self._pref = leg.pref
+            self._vacuum = leg.vacuum
 
     @property
-    def SU2phase(self):
-        return self._SU2phase
+    def phase(self):
+        return self._phase
 
     @property
-    def SU2pref(self):
-        return self._SU2pref
+    def pref(self):
+        return self._pref
 
     @property
     def vacuum(self):
@@ -31,7 +38,7 @@ class Leg:
             f"({self.__dict__})>"
 
     def same(self, leg):
-        return self.SU2phase == leg.SU2phase and self.SU2pref == leg.SU2pref
+        return self.phase == leg.phase and self.pref == leg.pref
 
 
 class Tensor:
@@ -80,30 +87,34 @@ class Tensor:
             raise ValueError('coupling should be an (x, 3 * (Leg, bool)) or '
                              '(3 * (Leg, bool)) nested list/tuple.')
 
-        self._coupling = tuple(tuple(tuple(el) for el in c) for c in coupling)
-
         for x in (el for c in coupling for el in c):
             if not (isinstance(x[0], Leg) and isinstance(x[1], bool)):
                 raise ValueError('coupling should be an (x, 3 * (Leg, bool)) '
                                  'or (3 * (Leg, bool)) nested list/tuple.')
 
         FIRSTTIME = self._coupling is None
+        self._coupling = tuple(tuple(tuple(el) for el in c) for c in coupling)
 
         # First time setting of the coupling
         if FIRSTTIME:
             self._indexes = []
             self._internallegs = []
 
-            flat_c = tuple(el[0] for c in self.coupling for el in c)
+            flat_c = tuple(el for c in self.coupling for el in c)
             flat_cnb = tuple(x for x, y in flat_c)
-            for x in set(flat_cnb):
+            uniques = set(flat_cnb)
+            for x in flat_cnb:
+                if x not in uniques:
+                    continue
+
+                uniques.remove(x)
                 occurences = flat_cnb.count(x)
                 if occurences == 1:
                     self._indexes.append(x)
                 elif occurences == 2:
                     foc = flat_cnb.index(x)
                     soc = flat_cnb[foc + 1:].index(x) + foc + 1
-                    if flat_c[foc][1] == flat_c[soc][2]:
+                    if flat_c[foc][1] == flat_c[soc][1]:
                         raise ValueError('Internal bond is not in-out')
 
                     self._internallegs.append(x)
@@ -140,9 +151,14 @@ class Tensor:
     def items(self):
         return self._data.items()
 
+    def ravel(self):
+        """Puts the sparse tensor in a onedimensional array.
+        """
+        return np.concatenate([d.ravel() for _, d in self.items()])
+
     @property
     def size(self):
-        return sum([d.size for _, d in self._data.items()])
+        return sum([d.size for _, d in self.items()])
 
     def coupling_id(self, leg):
         """Finds first occurence of leg in the coupling
@@ -223,31 +239,25 @@ class Tensor:
         cid = [[T.coupling_id(el) for el in ll] for T, ll in zip(AB, legs)]
 
         # equal amount new internal legs as pairs of legs
-        ilegs = [Leg(**l.__dict__) for l in legs[0]]
+        ilegs = [Leg(leg=l) for l in legs[0]]
 
         # Coupling and thus keys for the dictionary are
         # [self.coupling, B.coupling] appended to each other with the
         # appropriate legs substituted.
         C.coupling = tuple(el for T, ll in zip(AB, legs)
                            for el in T.substitutelegs(ll, ilegs))
-
         for Ak, Abl in self.items():
             Akcid = [Ak[x][y] for x, y in cid[0]]
             for Bk, Bbl in B.items():
                 if [Bk[x][y] for x, y in cid[1]] == Akcid:
                     C[(*Ak, *Bk)] = np.tensordot(Abl, Bbl, oid)
 
-        indexes = [list(T.indexes) for T in AB]
-        for ll, indx in zip(AB, indexes):
-            for x in ll:
-                indx.remove(x)
-        # appended
-        index = indexes[0].extend(indexes[1])
+        index = [x for l, T in zip(legs, AB) for x in T.indexes if x not in l]
+
         # Same length
-        assert len(index) == C._indexes
+        assert len(index) == len(C._indexes)
         assert len(set(index)) == len(C._indexes)
         assert not [ii for ii in index if ii not in C._indexes]
-
         C._indexes = index
 
         return C
@@ -308,7 +318,7 @@ class Tensor:
         R = Tensor(self.symmetries)
         Q = Tensor(self.symmetries)
 
-        nleg = Leg(*leg.__dict__) if ingoing else Leg(*leg.__dict__)
+        nleg = Leg(leg=leg)
         R.coupling = ((leg, True), (Leg(vacuum=True), True), (nleg, False)) if\
             ingoing else ((nleg, True), (Leg(vacuum=True), True), (leg, False))
 
