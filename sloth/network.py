@@ -1,137 +1,171 @@
 from sloth.tensor import Leg, Tensor
+import networkx as nx
 import jax.numpy as np
 from jax import jit
 import h5py
-import networkx as nx
 from sloth.symmetries import _SYMMETRIES
 
 
 class TNS(nx.MultiDiGraph):
     """Class for the TNS.
 
-    DiGraph subclassed
+    MultiGraph subclassed
 
     Attrs:
-        _legs: A dictionary which gives for each leg it's in and out.
+        _loose_legs: dictionary with Leg instances as keys. The values are the
+        nodes (Tensors) to which they are connected. These encompasses the
+        loose legs of the network, these are not yet added to the
+        Multigraph's edges.
     """
-    def __init__(self):
-        self._legs = {}
+    def __init__(self, nodes=None, tns=None, **attr):
+        if tns and not isinstance(tns, TNS):
+            raise ValueError('tns should be a TNS instance')
 
-    def __setitem__(self, idx, value):
-        self._legs[idx] = value
+        super(TNS, self).__init__(tns, **attr)
 
-    def __getitem__(self, idx):
-        return self._legs[idx]
+        if tns:
+            self._loose_legs = tns._loose_legs
+        else:
+            if nodes is not None:
+                self.add_nodes_from(nodes, **attr)
 
-    def __iter__(self):
-        return self._legs.__iter__()
+    def add_nodes_from(self, nodes, **attr):
+        for n in nodes:
+            self.add_node(n, **attr)
 
-    def __len__(self):
-        return len(self._legs)
+    def add_node(self, node, **attr):
+        if not isinstance(node, Tensor):
+            raise ValueError('node should be a Tensor instance.')
 
-    def gettensors(self):
-        """Returns a set of all the tensors found in the network
-        """
-        return set(T for k, ll in self.items() for T in ll
-                   if isinstance(T, Tensor))
+        if not hasattr(self, '_loose_legs'):
+            self._loose_legs = {}
 
-    def getvirtuals(self):
-        """Retrieves all the virtual Legs in the network
-        """
-        return set(k for k, (L, R) in self.items()
-                   if isinstance(L, Tensor) and isinstance(R, Tensor))
+        super(TNS, self).add_node(node, **attr)
+        # possibly connects the added tensor to a tensor already in the network
+        # if they have same Legs.
+        for ll in node.indexes:
+            if ll in self._loose_legs:
+                inflow = node.flowof(ll)
+                other_node, _ = self._loose_legs.pop(ll)
+                if inflow == other_node.flowof(ll):
+                    raise ValueError('Can\'t add node, conflicting flow')
 
-    def physical_id(self, T):
-        """Returns index of physical ids if tensor has physical connections.
-        """
-        return [int(self[i][not T.flowof(i)][1:]) for i in T.indexes if
-                isinstance(self[i][not T.flowof(i)], str)]
+                super(TNS, self).add_edge(other_node if inflow else node,
+                                          node if inflow else other_node,
+                                          leg=ll, label=hex(id(ll)))
+            else:
+                # Node and no name
+                self._loose_legs[ll] = node, None
 
-    def items(self):
-        return self._legs.items()
-
-    def lasttensor(self):
-        lasttensors = [v[0] for k, v in self.items() if v[1] is None]
-
-        if len(lasttensors) != 1:
-            raise ValueError('Multiple last tensors in network.')
-        return lasttensors[0]
-
-    def connections(self, tensor):
-        """Finds all objects that this tensor is connected to.
-
-        This can be a Tensor instance,
-        or a string for physical indices
-        or None for vacuums
-        """
-        return [self[i][not tensor.flowof(i)] for i in tensor.indexes]
-
-    def tneighbours(self, tensor):
-        """Finds all other tensors this tensor is connected to in the network.
-        """
-        return [T for T in self.connections(tensor) if isinstance(T, Tensor)]
-
-    def adjoint(self):
-        """Returns a deep copy with the adjoint of the tns.
-        """
+    def remove_nodes_from(self, nodes):
         raise NotImplementedError
 
-    def complete_contract(self):
-        T = self.lasttensor()
-        ready = set(self.tneighbours(T))
-        added = set(T)
+    def remove_node(self, node):
+        raise NotImplementedError
 
-        while True:
-            try:
-                A = ready.pop()
-            except KeyError:
-                break
+    def name_loose_edges_from(self, ebunch, **attr):
+        for e in ebunch:
+            u, v = e[0:2]
+            self.name_loose_edge(u, v, **attr)
 
-            assert A not in added
-            T = A @ T
-            added.add(A)
-            ready.update([t for t in self.tneighbours(A) if t not in added])
-        return T
+    def name_loose_edge(self, leg, name, **attr):
+        """This is only for edges which do not connect Tensor instances.
 
-    def plotGraph(self, ax=None, with_id=False):
-        """Plots a graph to the current pyplot scope.
+        Args:
+            leg: A Leg instance that should already be added in the
+            _loose_legs attribute of self.
+            name: The name of the loose edge.
         """
-        import networkx as nx
+        self._loose_legs[leg] = (self._loose_legs[leg][0], name)
 
-        if not hasattr(self, '_G'):
-            self._G = nx.DiGraph()
-            sites = self.gettensors()
-            virtuals = self.getvirtuals()
+    def fancy_draw(self, ax=None, node_color=None):
+        """Does whole bunch of stuff.
 
-            self._G.add_nodes_from(sites)
-            self._G.add_edges_from([self[i] for i in virtuals])
+        Cast the current MultiGraph to a MultiDiGraph
+        """
+        from networkx.algorithms.shortest_paths.unweighted \
+            import single_source_shortest_path_length as ss_short_path_length
+        from networkx.algorithms.shortest_paths import shortest_path
+        from networkx.algorithms.distance_measures import extrema_bounding
 
-        edge_labels = None
+        pos, color_map, labels = None, None, None
 
-        color_map = ['lightblue' if len(self.physical_id(s)) == 1 else 'green'
-                     for s in self._G]
+        # If it is the TNS itself I want to draw
+        undirected = self.to_undirected()
+        if nx.algorithms.tree.recognition.is_tree(undirected):
+            labels = {}
+            for ll, (N, name) in self._loose_legs.items():
+                if name:
+                    labels[N] = name[1:]
 
-        pos = None
-        if 'green' not in color_map:
-            count = 0
-            pos = {}
-            prev = None
-            for edge in self._G.edges:
-                assert prev is None or prev == edge[0]
-                pos[edge[0]] = (count, 0)
-                count += 1
-                prev = edge[1]
-            pos[prev] = (count, 0)
+            color_map = ['lightblue' if s in labels else 'green' for s in self]
 
-        labels = {}
-        for s in sites:
-            pid = self.physical_id(s)
-            assert len(pid) < 2
-            if len(pid) == 1:
-                labels[s] = pid[0]
+            # make a new graph keeping all branching tensors and edge tensors
+            for s in labels:
+                neighbors = list(undirected.neighbors(s))
+                assert len(neighbors) <= 2
+                if len(neighbors) == 2:
+                    undirected.add_edge(*neighbors)
+                    undirected.remove_node(s)
 
-        nx.draw(self._G, pos=pos, node_color=color_map, ax=ax,
-                labels=labels, edge_labels=edge_labels, with_labels=True)
+            # choose a branching tensor as center or else the last center
+            radius = extrema_bounding(undirected, compute='radius')
+            center = extrema_bounding(undirected, compute='center')[0]
+
+            # Assign every node to the right shell
+            nlist = [[] for i in range(radius + 1)]
+            for k, v in ss_short_path_length(undirected, center).items():
+                nlist[v].append(k)
+            # First shell exists out of one Node
+            assert len(nlist[0]) == 1
+
+            # create array of powers of radiuses
+            pos = {nlist[0][0]: {'r': 0, 'angle': 0}}
+            rs = np.power(np.sqrt(2), np.arange(radius))
+            nodes_on_shell = 3
+            for shell, r in zip(nlist[:-1], rs):
+                step = 2 * np.pi / nodes_on_shell
+                nodes_on_shell *= 2
+                for node in shell:
+                    neighbors = list(undirected.neighbors(node))
+                    angle = pos[node]['angle'] if len(neighbors) != 3 else \
+                        pos[node]['angle'] - step / 2.
+                    for neighbor in neighbors:
+                        if neighbor not in pos:
+                            pos[neighbor] = {'r': r, 'angle': angle}
+                            angle += step
+
+            def pol2cart(r=0, angle=0):
+                return np.array([r * np.cos(angle), r * np.sin(angle)])
+
+            pos = {k: pol2cart(**v) for k, v in pos.items()}
+            for u, v, _ in undirected.edges:
+                nodes_inbetween = shortest_path(
+                    self.to_undirected(as_view=True), u, v)
+                xy_step = (pos[v] - pos[u]) / (len(nodes_inbetween) - 1.)
+
+                for ii, nodes in enumerate(nodes_inbetween[1:-1], start=1):
+                    pos[nodes] = pos[u] + ii * xy_step
+
+        if node_color is None:
+            node_color = color_map
+
+        nx.draw(self, pos=pos, ax=ax, node_color=node_color, labels=labels,
+                with_labels=True)
+
+    @property
+    def sink(self):
+        """Returns the sink tensor.
+        """
+        return nx.algorithms.dag.dag_longest_path(self)[-1]
+
+    def contract(self):
+        """Fully contracts the network. Is not necessarily efficient.
+        """
+
+    def all_neighbours(self, n):
+        from itertools import chain
+        return chain(self.predecessors(n), self.successors(n))
 
 
 def read_h5(filename):
@@ -139,8 +173,6 @@ def read_h5(filename):
 
     Returns the network.
     """
-    tns = TNS()
-
     h5file = h5py.File(filename, 'r')
     sym = [_SYMMETRIES[i] for i in h5file['bookkeeper'].attrs['sgs']]
 
@@ -152,10 +184,6 @@ def read_h5(filename):
     vlegs = [Leg(phase=x != -1, pref=(y != -1 and x != -1), vacuum=x == -1)
              for x, y in bonds]
     plegs = [Leg() for i in range(h5file['network'].attrs['psites'].item())]
-    for vl in vlegs:
-        tns[vl] = [None, None]
-    for i, pl in enumerate(plegs):
-        tns[pl] = [f'p{i}', None]
 
     sitetoorb = h5file['network']['sitetoorb']
     bookie = h5file['bookkeeper']
@@ -176,9 +204,6 @@ def read_h5(filename):
         coupl = [vlegs[i] if isinstance(i, int) else
                  plegs[int(i[1:])] for i in tbonds]
         A.coupling = [(i, b) for i, b in zip(coupl, [True, True, False])]
-        for x, y in A.coupling[0]:
-            assert tns[x][y] is None
-            tns[x][y] = A
 
         # reshaping the irreps bit
         sirr = [np.array(s['irreps']).reshape(
@@ -205,4 +230,8 @@ def read_h5(filename):
             end = block['beginblock'][block_id + 1]
             A[key] = np.array(block['tel'][begin:end]).reshape(shape)
 
+    tns = TNS(nodes=tensors)
+    tns.name_loose_edges_from([[pl, f'p{ii}'] for ii, pl in enumerate(plegs)])
+
+    assert nx.algorithms.tree.recognition.is_tree(tns)
     return tns
