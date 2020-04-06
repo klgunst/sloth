@@ -17,28 +17,26 @@ class TNS(nx.MultiDiGraph):
         loose legs of the network, these are not yet added to the
         Multigraph's edges.
     """
-    def __init__(self, nodes=None, tns=None, **attr):
-        if tns and not isinstance(tns, TNS):
-            raise ValueError('tns should be a TNS instance')
+    def __init__(self, data=None, **attr):
+        super(TNS, self).__init__(**attr)
 
-        super(TNS, self).__init__(tns, **attr)
+        self._loose_legs = {}
+        if data is not None:
+            self.add_nodes_from(data, **attr)
 
-        if tns:
-            self._loose_legs = tns._loose_legs
-        else:
-            if nodes is not None:
-                self.add_nodes_from(nodes, **attr)
+        if isinstance(data, TNS):
+            self._loose_legs = data._loose_legs.copy()
 
     def add_nodes_from(self, nodes, **attr):
         for n in nodes:
-            self.add_node(n, **attr)
+            if isinstance(n, tuple) and len(n) == 2 and isinstance(n[1], dict):
+                self.add_node(n[0], **n[1], **attr)
+            else:
+                self.add_node(n, **attr)
 
     def add_node(self, node, **attr):
         if not isinstance(node, Tensor):
             raise ValueError('node should be a Tensor instance.')
-
-        if not hasattr(self, '_loose_legs'):
-            self._loose_legs = {}
 
         super(TNS, self).add_node(node, **attr)
         # possibly connects the added tensor to a tensor already in the network
@@ -58,10 +56,13 @@ class TNS(nx.MultiDiGraph):
                 self._loose_legs[ll] = node, None
 
     def remove_nodes_from(self, nodes):
-        raise NotImplementedError
+        for n in nodes:
+            self.remove_node(n)
 
     def remove_node(self, node):
-        raise NotImplementedError
+        super(TNS, self).remove_node(node)
+        self._loose_legs = {k: (n, name) for k, (n, name) in
+                            self._loose_legs.items() if n != node}
 
     def name_loose_edges_from(self, ebunch, **attr):
         for e in ebunch:
@@ -96,7 +97,10 @@ class TNS(nx.MultiDiGraph):
             labels = {}
             for ll, (N, name) in self._loose_legs.items():
                 if name:
-                    labels[N] = name[1:]
+                    if N in labels:
+                        labels[N] += f',{name[1:]}'
+                    else:
+                        labels[N] = name[1:]
 
             color_map = ['lightblue' if s in labels else 'green' for s in self]
 
@@ -151,6 +155,7 @@ class TNS(nx.MultiDiGraph):
             node_color = color_map
 
         nx.draw(self, pos=pos, ax=ax, node_color=node_color, labels=labels,
+                node_size=[len(s.coupling) * 300 for s in self],
                 with_labels=True)
 
     @property
@@ -159,13 +164,57 @@ class TNS(nx.MultiDiGraph):
         """
         return nx.algorithms.dag.dag_longest_path(self)[-1]
 
-    def contract(self):
+    def contracted_nodes(self, A, B):
+        """Contracts two nodes of a given graph and returns the resulting
+        graph.
+        """
+        if A not in nx.all_neighbors(self, B):
+            raise ValueError(
+                'The two tensors are not neighbours in the network')
+
+        T = A @ B
+        result = TNS(tuple(T if n == A else n for n in self if n != B))
+
+        result.name_loose_edges_from([[ll, name] for ll, (_, name) in
+                                      self._loose_legs.items()])
+        return result
+
+    def boundaries(self):
+        """iterator over all the boundary tensors (only if it is a dag)
+        """
+        undirected = self.to_undirected(as_view=True)
+        if not nx.algorithms.tree.recognition.is_tree(undirected):
+            raise ValueError('Graph needs to be a a tree')
+
+        for n in undirected:
+            if undirected.degree(n) == 1:
+                yield n
+
+    def contract(self, pass_intermediates=False):
         """Fully contracts the network. Is not necessarily efficient.
         """
+        netw = TNS(self)
+        if pass_intermediates:
+            interm = []
 
-    def all_neighbours(self, n):
-        from itertools import chain
-        return chain(self.predecessors(n), self.successors(n))
+        while netw.number_of_nodes() != 1:
+            T = None
+            for x in netw.boundaries():
+                if T is None or len(T.indexes) > len(x.indexes):
+                    T = x
+
+            # One of the neighbours
+            for A in nx.all_neighbors(netw, T):
+                break
+            netw = netw.contracted_nodes(A, T)
+            if pass_intermediates:
+                interm.append(netw)
+
+
+        if pass_intermediates:
+            return netw, interm
+        else:
+            return netw
 
 
 def read_h5(filename):
@@ -230,8 +279,8 @@ def read_h5(filename):
             end = block['beginblock'][block_id + 1]
             A[key] = np.array(block['tel'][begin:end]).reshape(shape)
 
-    tns = TNS(nodes=tensors)
+    tns = TNS(tensors)
     tns.name_loose_edges_from([[pl, f'p{ii}'] for ii, pl in enumerate(plegs)])
 
-    assert nx.algorithms.tree.recognition.is_tree(tns)
+    assert nx.algorithms.dag.is_directed_acyclic_graph(tns)
     return tns
