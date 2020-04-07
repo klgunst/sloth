@@ -1,9 +1,8 @@
-from sloth.tensor import Leg, Tensor
+from sloth.tensor import Leg, Tensor, _SYMMETRIES
 import networkx as nx
 import jax.numpy as np
 from jax import jit
 import h5py
-from sloth.symmetries import _SYMMETRIES
 
 
 class TNS(nx.MultiDiGraph):
@@ -102,13 +101,13 @@ class TNS(nx.MultiDiGraph):
                     else:
                         labels[N] = name[1:]
 
-            color_map = ['lightblue' if s in labels else 'green' for s in self]
+            color_map = ['lightblue' if self.degree(s) < 3 else 'green'
+                         for s in self]
 
             # make a new graph keeping all branching tensors and edge tensors
-            for s in labels:
+            for s in self:
                 neighbors = list(undirected.neighbors(s))
-                assert len(neighbors) <= 2
-                if len(neighbors) == 2:
+                if undirected.degree(s) == 2:
                     undirected.add_edge(*neighbors)
                     undirected.remove_node(s)
 
@@ -176,8 +175,8 @@ class TNS(nx.MultiDiGraph):
         result = TNS(tuple(T if n == A else n for n in self if n != B))
 
         result.name_loose_edges_from([[ll, name] for ll, (_, name) in
-                                      self._loose_legs.items()])
-        return result
+                                      self._loose_legs.items() if name])
+        return result, T
 
     def boundaries(self):
         """iterator over all the boundary tensors (only if it is a dag)
@@ -206,7 +205,7 @@ class TNS(nx.MultiDiGraph):
             # One of the neighbours
             for A in nx.all_neighbors(netw, T):
                 break
-            netw = netw.contracted_nodes(A, T)
+            netw = netw.contracted_nodes(A, T)[0]
             if pass_intermediates:
                 interm.append(netw)
 
@@ -215,16 +214,43 @@ class TNS(nx.MultiDiGraph):
         else:
             return netw
 
-    def qr(self, node, edge):
+    def qr(self, node, leg):
         """Splits a node into two subnodes.
 
         Edge decides how to split the node.
         """
         tns = TNS(T for T in self if T != node)
-        tns.add_nodes_from(node.qr(edge['leg']))
+        Q, R = node.qr(leg)
+        tns.add_nodes_from((Q, R))
         tns.name_loose_edges_from([[ll, name] for ll, (_, name) in
                                    self._loose_legs.items()])
-        return tns
+        return tns, (Q, R)
+
+    def move_orthogonality_center(self, nodeA, nodeB, pass_interm=False):
+        """Moves the orthogonality center from nodeA to nodeB.
+
+        Does not check if nodeA is orthogonality center!
+        """
+        interm = []
+        path = nx.algorithms.shortest_paths.shortest_path(
+            self.to_undirected(as_view=True), nodeA, nodeB)
+        tns = self
+        A = nodeA
+
+        for B in path[1:]:
+            leg = tns.to_undirected(as_view=True).edges[A, B, 0]['leg']
+            tns, (Q, R) = tns.qr(A, leg)
+            if pass_interm:
+                interm.append(tns)
+
+            tns, A = tns.contracted_nodes(R, B)
+            if pass_interm:
+                interm.append(tns)
+
+        if pass_interm:
+            return tns, interm
+        else:
+            return tns
 
 
 def read_h5(filename):

@@ -1,5 +1,8 @@
-from sloth.symmetries import _SYMMETRIES, symswap
 import jax.numpy as np
+from jax import jit
+
+_SYMMETRIES = ['fermionic', 'U(1)', 'SU(2)', 'C1', 'Ci', 'C2', 'Cs', 'D2',
+               'C2v', 'C2h', 'D2h', 'seniority']
 
 
 class Leg:
@@ -226,8 +229,8 @@ class Tensor:
                     'I could fix this by automatically inserting a vacuum')
 
             if not l1.same(l2):
-                raise ValueError('{l1} and {l2} do not have same prefactors on'
-                                 ' it. I could probably fix that myself')
+                raise ValueError(f'{l1} and {l2} do not have same prefactors '
+                                 'on it. I could probably fix that myself')
 
         C = Tensor(self.symmetries)
         fcoup = tuple(T.indexes for T in AB)
@@ -262,26 +265,163 @@ class Tensor:
 
         return C
 
+    def _manipulate_coupling(self, mappingf, prefactorf):
+        """General function for manipulation of the coupling
+
+        Args:
+            mappingf: Function that maps the old keys to new keys of the tensor
+            prefactorf: Function that gives the prefactor given the old key and
+            new key for the transformation.
+        """
+
+        ndata = {}
+        for okey in self:
+            for nkey in mappingf(okey):
+                prefactor = prefactorf(okey, nkey)
+
+                if nkey in ndata:
+                    ndata[nkey] += prefactor * self[okey]
+                else:
+                    ndata[nkey] = prefactor * self[okey]
+        self._data = ndata
+
     def coupling_swap(self, cid, permute):
         """
+        Permutes the indices in a given coupling.
+
+        Args:
+            cid: The coupling id in which to permute.
+            permute: Permutation array.
         """
+        permute = tuple(permute)
+        if len(permute) != 3 or 0 not in permute or \
+                1 not in permute or 2 not in permute:
+            raise ValueError("Permutation array should be 0, 1, 2 shuffled")
+
         oc = self.coupling[cid]
         sc = tuple(oc[p] for p in permute)
         self.coupling = tuple(sc if i == cid else c for i, c in
                               enumerate(self.coupling))
 
-        ndata = {}
-        for key in self:
-            ok = key[cid]
-            nk = tuple(ok[p] for p in permute)
-            nkey = tuple(nk if i == cid else c for i, c in enumerate(key))
+        def mappingf(okey):
+            yield tuple(
+                tuple(okey[i][p] for p in permute) if i == cid else c
+                for i, c in enumerate(okey)
+            )
 
-            prefactor = np.prod([symswap(ss, [kk[i] for kk in ok], permute)
-                                 for i, ss in enumerate(self.symmetries)])
+        # Fermionic prefactors for all different permutations
+        def fpref_123(a, b, c):
+            return 1.
 
-            self[key] *= prefactor
-            ndata[nkey] = self[key]
-        self._data = ndata
+        def fpref_213(a, b, c):
+            # a and b are odd
+            return -1. if a & 1 and b % 1 else 1.
+
+        def fpref_132(a, b, c):
+            # b and c are odd
+            return -1. if b & 1 and c % 1 else 1.
+
+        def fpref_321(a, b, c):
+            # |1|(|2| + |3|) + |2||3|
+            return -1. if (a * (b + c) + b * c) & 1 else 1.
+
+        def fpref_312(a, b, c):
+            # |3|(|1| + |2|)
+            return -1. if c * (a + b) & 1 else 1.
+
+        def fpref_231(a, b, c):
+            # |1|(|2| + |3|)
+            return -1. if a * (b + c) & 1 else 1.
+
+        fpref = {(0, 1, 2): fpref_123, (1, 0, 2): fpref_213,
+                 (0, 2, 1): fpref_132, (2, 1, 0): fpref_321,
+                 (2, 0, 1): fpref_312, (1, 2, 0): fpref_231}[permute]
+        fids = tuple(ii for ii, ss in enumerate(self.symmetries)
+                     if ss == 'fermionic')
+
+        if 'SU(2)' in self.symmetries:
+            raise NotImplementedError
+
+        @jit
+        def prefactorf(okey, nkey):
+            # return 1. for empty array
+            return np.prod([fpref(*[k[ii] for k in okey]) for ii in fids])
+
+        self._manipulate_coupling(mappingf, prefactorf)
+
+    def _remove_vacuumcoupling(self):
+        """Removes couplings to the vacuum, if the tensor has multiple
+        couplings.
+
+        Only removes the vacuum if other two legs in the coupling have an
+        opposite flow.
+
+        Returns:
+            If a vacuum has been removed.
+        """
+        if len(self.coupling) == 1 or \
+                sum([ll.vacuum for ll in self.indexes]) == 0:
+            return False
+
+        flag = False
+        for vac in self.indexes:
+            if vac.vacuum:
+                id0, id1 = self.coupling_id(vac)
+                vac_coupling = self.coupling[id0]
+                fid, sid = [[1, 2], [0, 2], [0, 1]][id1]
+                fleg, sleg = vac_coupling[fid], vac_coupling[sid]
+
+                # Other legs do not have the same flow
+                if fleg[1] is not sleg[1]:
+                    flag = True
+                    break
+
+        # No suitable vacuum found do remove.
+        if not flag:
+            return False
+
+        def mappingf(okey):
+            yield tuple(c for ii, c in enumerate(okey) if ii != id0)
+
+        def fprefactor_1(a, b):
+            return 1.
+
+        def fprefactor_2(a, b):
+            return -1. if a & 1 and b & 1 else 1.
+
+        fpref = fprefactor_1 if fleg[1] else fprefactor_2
+        fids = tuple(ii for ii, ss in enumerate(self.symmetries)
+                     if ss == 'fermionic')
+
+        @jit
+        def prefactorf(okey, nkey):
+            # return 1. for empty array
+            return np.prod([fpref(*[k[ii] for k in okey]) for ii in fids])
+
+        self._manipulate_coupling(mappingf, prefactorf)
+
+        # fleg or sleg (one of the other legs in the coupling) is internal
+        # Or both. remove either sleg or fleg and substitute it by the other
+        # everywhere in the couplings
+        if fleg[0] in self._internallegs:
+            to_rm, to_swap = fleg[0], sleg[0]
+        else:
+            to_rm, to_swap = sleg[0], fleg[0]
+
+        # Substitute the internal by the other leg
+        temp = self.substitutelegs([to_rm], [to_swap])
+        # Remove the coupling
+        self._coupling = tuple(c for ii, c in enumerate(temp) if ii != id0)
+
+        # Remove vacuum from index
+        ii = self._indexes.index(vac)
+        self._indexes.remove(vac)
+
+        self._internallegs.remove(to_rm)
+
+        for k, v in self.items():
+            self[k] = np.squeeze(v, axis=ii)
+        return True
 
     def simplify(self):
         """This function tries to simplify a tensor by changing it's coupling.
@@ -290,7 +430,10 @@ class Tensor:
             * Removes couplings to the vacuum, if the tensor has multiple
               couplings.
         """
-        # Remove couplings with vacuum leg in first or second thingy
+        # Iteratively remove vacuums until finished
+        while self._remove_vacuumcoupling():
+            pass
+
         return self
 
     def qr(self, leg):
@@ -350,7 +493,7 @@ class Tensor:
             Aarr = [np.transpose(self[block], transp).reshape(-1, leading_dim)
                     for block in blocks]
 
-            Aspl = np.cumsum([r.shape[0] for r in Aarr[:-1]])
+            Aspl = np.cumsum(np.array([r.shape[0] for r in Aarr[:-1]]))
 
             q, r = np.linalg.qr(np.vstack(Aarr))
             r = np.expand_dims(r, axis=1)
