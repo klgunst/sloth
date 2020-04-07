@@ -326,7 +326,7 @@ class Tensor:
         Q._indexes = tuple(i if i != leg else nleg for i in self._indexes)
         vacuum = (0,) * len(self.symmetries)
 
-        assert [x == nleg for x in R.connections(self)] == [True]
+        assert [x == nleg for x in R.connections(Q)] == [True]
 
         keys = set([k[i1][i2] for k in self])
         transp = list(range(len(self.indexes)))

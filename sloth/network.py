@@ -210,11 +210,21 @@ class TNS(nx.MultiDiGraph):
             if pass_intermediates:
                 interm.append(netw)
 
-
         if pass_intermediates:
             return netw, interm
         else:
             return netw
+
+    def qr(self, node, edge):
+        """Splits a node into two subnodes.
+
+        Edge decides how to split the node.
+        """
+        tns = TNS(T for T in self if T != node)
+        tns.add_nodes_from(node.qr(edge['leg']))
+        tns.name_loose_edges_from([[ll, name] for ll, (_, name) in
+                                   self._loose_legs.items()])
+        return tns
 
 
 def read_h5(filename):
