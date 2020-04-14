@@ -314,9 +314,10 @@ def read_h5(filename):
             shape = [s['dims'][i] for i, s in zip(indexes, symsecs)]
             key = (tuple([tuple(irr[i]) for i, irr in zip(indexes, sirr)]),)
 
-            # TODO fix everything to C order??
-            A[key] = np.array(block['tel'][begin:end],
-                              dtype=np.float64).reshape(shape, order='F')
+            # Have to watch out for that sneaky Fortran order!!
+            Ablock = block['tel'][begin:end].reshape(shape, order='F')
+            # And now cast everything to a C order and to np.float64
+            A[key] = np.array(Ablock, order='C', dtype=np.float64)
 
     tns = TNS(tensors)
     tns.name_loose_edges_from([[pl, f'p{ii}'] for ii, pl in enumerate(plegs)])
