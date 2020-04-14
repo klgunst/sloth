@@ -25,6 +25,10 @@ class TNS(nx.MultiDiGraph):
         if isinstance(data, TNS):
             self._loose_legs = data._loose_legs.copy()
 
+    @property
+    def unique_legs(self):
+        return set(x[-1] for x in self.edges(data='leg'))
+
     def add_nodes_from(self, nodes, **attr):
         for n in nodes:
             if isinstance(n, tuple) and len(n) == 2 and isinstance(n[1], dict):
@@ -157,6 +161,13 @@ class TNS(nx.MultiDiGraph):
                 with_labels=True)
 
     @property
+    def orbitals(self):
+        """The orbitals in the current tensor network.
+        """
+        return [int(name[1:]) for k, (_, name) in self._loose_legs.items()
+                if name is not None and name[1] == 'p']
+
+    @property
     def sink(self):
         """Returns the sink tensor.
         """
@@ -254,6 +265,27 @@ class TNS(nx.MultiDiGraph):
             return tns, A, interm
         else:
             return tns, A
+
+    def calculate_singular_values(self, current_ortho):
+        """Calculates the singular values along **all** internal edges.
+        """
+        svals = {}
+        legs_to_visit = self.unique_legs
+
+        def go_through(tns, A):
+            for x, y, leg in \
+                    tns.to_undirected(as_view=True).edges(A, data='leg'):
+                assert A == x
+                if leg in legs_to_visit:
+                    legs_to_visit.remove(leg)
+                    cur_tns, (Q, R) = tns.qr(A, leg)
+                    svals[leg] = R.svd(compute_uv=False)
+                    cur_tns, B = cur_tns.contracted_nodes(R, y)
+                    go_through(cur_tns, B)
+
+        go_through(self, current_ortho)
+        assert len(svals) == len(self.edges)
+        return svals
 
 
 def read_h5(filename):

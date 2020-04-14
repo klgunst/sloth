@@ -523,15 +523,44 @@ class Tensor:
 
         return Q, R
 
-    def svd(self, leg=None):
+    def svd(self, leg=None, compute_uv=True):
         """Executes a SVD along the given leg(s).
 
         Args:
             leg: If None, it means that a vacuum-coupled tensor with only one
             coupling is inputted wich will be approriately decomposed.
 
-            If one leg or a list of legs are given, these legs should devide
-            the coupling scheme into two disjunct parts when made a cut along
-            these legs.
+            If an internal leg is given, the tensor is divided along this leg.
+
+            compute_uv: False if only the singular values are needed.
         """
-        pass
+
+        if leg:
+            if leg not in self.internallegs:
+                raise ValueError('Leg is not an internal one')
+        else:
+            if len(self.coupling) != 1:
+                raise ValueError(
+                    'For SVD with no leg specified, the tensor should be a '
+                    'simple one with only 1 coupling to the vacuum.')
+            try:
+                Sid = [l.vacuum for l in self.indexes].index(True)
+                _, Scid = self.coupling_id(self.indexes[Sid])
+            except ValueError:
+                raise ValueError(
+                    'For SVD with no leg specified, the tensor should be a '
+                    'simple one with only 1 coupling to the vacuum.')
+
+            if compute_uv:
+                raise ValueError('For SVD with no leg only allowed for '
+                                 'calculating the singular values themselves.')
+
+            S = {'Symmetries': self.symmetries}
+            Ucid = 0 if Scid != 0 else 1
+            Vcid = 2 if Scid != 2 else 1
+
+            for key, block in self.items():
+                assert key[0][Ucid] == key[0][Vcid]
+                S[key[0][Ucid]] = np.linalg.svd(np.squeeze(block, axis=Sid),
+                                                compute_uv=False)
+            return S
