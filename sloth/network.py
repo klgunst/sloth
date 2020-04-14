@@ -1,7 +1,6 @@
 from sloth.tensor import Leg, Tensor, _SYMMETRIES
 import networkx as nx
-import jax.numpy as np
-from jax import jit
+import numpy as np
 import h5py
 
 
@@ -214,7 +213,7 @@ class TNS(nx.MultiDiGraph):
         else:
             return netw
 
-    def qr(self, node, leg):
+    def qr(self, node, leg, intermittent_renorm=False):
         """Splits a node into two subnodes.
 
         Edge decides how to split the node.
@@ -224,12 +223,18 @@ class TNS(nx.MultiDiGraph):
         tns.add_nodes_from((Q, R))
         tns.name_loose_edges_from([[ll, name] for ll, (_, name) in
                                    self._loose_legs.items()])
+        if intermittent_renorm:
+            R /= np.linalg.norm(R.ravel())
         return tns, (Q, R)
 
     def move_orthogonality_center(self, nodeA, nodeB, pass_interm=False):
         """Moves the orthogonality center from nodeA to nodeB.
 
         Does not check if nodeA is orthogonality center!
+
+        Args:
+            intermittent_renorm: True if at every QR decomposition R should be
+            renormalized.
         """
         interm = []
         path = nx.algorithms.shortest_paths.shortest_path(
@@ -239,18 +244,16 @@ class TNS(nx.MultiDiGraph):
 
         for B in path[1:]:
             leg = tns.to_undirected(as_view=True).edges[A, B, 0]['leg']
-            tns, (Q, R) = tns.qr(A, leg)
-            if pass_interm:
-                interm.append(tns)
+            tns2, (Q, R) = tns.qr(A, leg)
+            tns, A = tns2.contracted_nodes(R, B)
 
-            tns, A = tns.contracted_nodes(R, B)
             if pass_interm:
-                interm.append(tns)
+                interm.extend([tns2, tns])
 
         if pass_interm:
-            return tns, interm
+            return tns, A, interm
         else:
-            return tns
+            return tns, A
 
 
 def read_h5(filename):
@@ -295,7 +298,6 @@ def read_h5(filename):
             s.attrs['nrSecs'].item(), -1)[:, :len(sym)] for s in symsecs
                 ]
 
-        @jit
         def get_ids(qn):
             dims = np.array([s.attrs['nrSecs'].item() for s in symsecs],
                             dtype=np.int32)
@@ -306,14 +308,15 @@ def read_h5(filename):
             return indices
 
         block = T['block_0']
-        for block_id in range(block.attrs['nrBlocks'].item()):
-            indexes = get_ids(T['qnumbers'][block_id])
+        for bid, (begin, end) in \
+                enumerate(zip(block['beginblock'], block['beginblock'][1:])):
+            indexes = get_ids(T['qnumbers'][bid])
             shape = [s['dims'][i] for i, s in zip(indexes, symsecs)]
             key = (tuple([tuple(irr[i]) for i, irr in zip(indexes, sirr)]),)
 
-            begin = block['beginblock'][block_id]
-            end = block['beginblock'][block_id + 1]
-            A[key] = np.array(block['tel'][begin:end]).reshape(shape)
+            # TODO fix everything to C order??
+            A[key] = np.array(block['tel'][begin:end],
+                              dtype=np.float64).reshape(shape, order='F')
 
     tns = TNS(tensors)
     tns.name_loose_edges_from([[pl, f'p{ii}'] for ii, pl in enumerate(plegs)])

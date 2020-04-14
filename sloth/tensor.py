@@ -1,5 +1,4 @@
-import jax.numpy as np
-from jax import jit
+import numpy as np
 
 _SYMMETRIES = ['fermionic', 'U(1)', 'SU(2)', 'C1', 'Ci', 'C2', 'Cs', 'D2',
                'C2v', 'C2h', 'D2h', 'seniority']
@@ -151,6 +150,15 @@ class Tensor:
     def __len__(self):
         return len(self._data)
 
+    def iterate(self, keys, couple_ids):
+        """Iterations over the correct blocks which have value keys at the
+        couple_ids.
+        """
+        # TODO: Better second iteration over only valid keys?
+        for key, block in self.items():
+            if [key[x][y] for x, y in couple_ids] == keys:
+                yield key, block
+
     def items(self):
         return self._data.items()
 
@@ -158,6 +166,11 @@ class Tensor:
         """Puts the sparse tensor in a onedimensional array.
         """
         return np.concatenate([d.ravel() for _, d in self.items()])
+
+    def norm(self):
+        """Calculates the norm of the tensor
+        """
+        return np.linalg.norm(self.ravel())
 
     @property
     def size(self):
@@ -187,14 +200,10 @@ class Tensor:
         """returns a coupling tuple where oldleg in self is swapped with
         newleg.
         """
-        flatc = [el[0] for tpl in self.coupling for el in tpl]
-        for ol in old:
-            if ol not in flatc:
-                raise ValueError(f'{ol} not a coupling for {self}')
-
-        return tuple(
-            tuple((new[old.index(x)], y) if x in old else (x, y) for x, y in z)
-            for z in self.coupling)
+        # making dictionary
+        dic = {o: n for o, n in zip(old, new)}
+        return tuple(tuple((dic.get(x, x), y)
+                           for x, y in z) for z in self.coupling)
 
     def __matmul__(self, B):
         """Trying to completely contract self and B for all matching bonds.
@@ -204,6 +213,16 @@ class Tensor:
             raise ValueError(f'No connections found between {self} and {B}')
 
         return self.contract(B, (connections,) * 2).simplify()
+
+    def __imul__(self, a):
+        for key in self:
+            self[key] *= a
+        return self
+
+    def __itruediv__(self, a):
+        for key in self:
+            self[key] /= a
+        return self
 
     def contract(self, B, legs):
         """This function contract legs of two tensors.
@@ -233,10 +252,9 @@ class Tensor:
                                  'on it. I could probably fix that myself')
 
         C = Tensor(self.symmetries)
-        fcoup = tuple(T.indexes for T in AB)
 
         # index for the tensor itself of each leg
-        oid = [[fl.index(el) for el in ll] for fl, ll in zip(fcoup, legs)]
+        oid = [[T.indexes.index(el) for el in ll] for T, ll in zip(AB, legs)]
 
         # coupling index for each leg
         cid = [[T.coupling_id(el) for el in ll] for T, ll in zip(AB, legs)]
@@ -247,20 +265,21 @@ class Tensor:
         # Coupling and thus keys for the dictionary are
         # [self.coupling, B.coupling] appended to each other with the
         # appropriate legs substituted.
+        shapes = [len(T.indexes) for T in AB]
         C.coupling = tuple(el for T, ll in zip(AB, legs)
                            for el in T.substitutelegs(ll, ilegs))
         for Ak, Abl in self.items():
             Akcid = [Ak[x][y] for x, y in cid[0]]
-            for Bk, Bbl in B.items():
-                if [Bk[x][y] for x, y in cid[1]] == Akcid:
-                    C[(*Ak, *Bk)] = np.tensordot(Abl, Bbl, oid)
+
+            for Bk, Bbl in B.iterate(Akcid, cid[1]):
+                assert len(Abl.shape) == shapes[0]
+                assert len(Bbl.shape) == shapes[1]
+                C[(*Ak, *Bk)] = np.tensordot(Abl, Bbl, oid)
 
         index = [x for l, T in zip(legs, AB) for x in T.indexes if x not in l]
 
-        # Same length
-        assert len(index) == len(C._indexes)
-        assert len(set(index)) == len(C._indexes)
-        assert not [ii for ii in index if ii not in C._indexes]
+        # Same array with unique elements
+        assert set(index) == set(C._indexes) and len(index) == len(set(index))
         C._indexes = index
 
         return C
@@ -342,7 +361,6 @@ class Tensor:
         if 'SU(2)' in self.symmetries:
             raise NotImplementedError
 
-        @jit
         def prefactorf(okey, nkey):
             # return 1. for empty array
             return np.prod([fpref(*[k[ii] for k in okey]) for ii in fids])
@@ -393,7 +411,6 @@ class Tensor:
         fids = tuple(ii for ii, ss in enumerate(self.symmetries)
                      if ss == 'fermionic')
 
-        @jit
         def prefactorf(okey, nkey):
             # return 1. for empty array
             return np.prod([fpref(*[k[ii] for k in okey]) for ii in fids])
@@ -461,12 +478,12 @@ class Tensor:
         R = Tensor(self.symmetries)
         Q = Tensor(self.symmetries)
 
-        nleg = Leg(leg=leg)
+        nleg = Leg(phase=True, pref=True)
         R.coupling = ((leg, True), (Leg(vacuum=True), True), (nleg, False)) if\
             ingoing else ((nleg, True), (Leg(vacuum=True), True), (leg, False))
 
         Q.coupling = self.substitutelegs([leg], [nleg])
-        Q._indexes = tuple(i if i != leg else nleg for i in self._indexes)
+        Q._indexes = tuple(i if i != leg else nleg for i in self.indexes)
         vacuum = (0,) * len(self.symmetries)
 
         assert [x == nleg for x in R.connections(Q)] == [True]
@@ -505,3 +522,16 @@ class Tensor:
                     x.reshape(np.array(self[block].shape)[transp]), i_transp)
 
         return Q, R
+
+    def svd(self, leg=None):
+        """Executes a SVD along the given leg(s).
+
+        Args:
+            leg: If None, it means that a vacuum-coupled tensor with only one
+            coupling is inputted wich will be approriately decomposed.
+
+            If one leg or a list of legs are given, these legs should devide
+            the coupling scheme into two disjunct parts when made a cut along
+            these legs.
+        """
+        pass
