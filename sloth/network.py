@@ -164,14 +164,21 @@ class TNS(nx.MultiDiGraph):
     def orbitals(self):
         """The orbitals in the current tensor network.
         """
-        return [int(name[1:]) for k, (_, name) in self._loose_legs.items()
-                if name is not None and name[1] == 'p']
+        return set(int(name[1:]) for k, (_, name) in self._loose_legs.items()
+                   if name is not None and name[0] == 'p')
 
     @property
     def sink(self):
         """Returns the sink tensor.
         """
         return nx.algorithms.dag.dag_longest_path(self)[-1]
+
+    def nodes_with_leg(self, leg):
+        """Returns the two nodes that border on the given leg.
+        """
+        for u, v, ll in self.to_undirected(as_view=True).edges(data='leg'):
+            if ll == leg:
+                return u, v
 
     def contracted_nodes(self, A, B):
         """Contracts two nodes of a given graph and returns the resulting
@@ -283,9 +290,48 @@ class TNS(nx.MultiDiGraph):
                     cur_tns, B = cur_tns.contracted_nodes(R, y)
                     go_through(cur_tns, B)
 
+            for leg in [k for k, v in tns._loose_legs.items() if v[0] == A]:
+                _, (_, R) = tns.qr(A, leg)
+                svals[leg] = R.svd(compute_uv=False)
+
         go_through(self, current_ortho)
-        assert len(svals) == len(self.edges)
         return svals
+
+    def get_orbital_partition(self, leg):
+        """Returns two sets one set for the collection of orbitals on each side
+        of the leg in the network.
+        """
+        from networkx.algorithms.components import is_connected, \
+            number_connected_components, connected_components
+
+        tns = self.to_undirected(as_view=False)
+        if not is_connected(tns):
+            raise ValueError(
+                'The given graph should be connected for a good partition')
+
+        if leg in self._loose_legs:
+            name = self._loose_legs[leg][1]
+            if name and name[0] == 'p':
+                orb = int(name[1:])
+
+                lset = set([orb])
+                rset = self.orbitals
+                rset.remove(orb)
+            else:
+                lset = set()
+                rset = self.orbitals
+        else:
+            tns.remove_edge(*self.nodes_with_leg(leg))
+            assert number_connected_components(tns) == 2
+
+            lset, rset = [
+                set(int(name[1:]) for _, (n, name) in self._loose_legs.items()
+                    if n in G and name and name[0] == 'p')
+                for G in connected_components(tns)]
+
+        assert lset.isdisjoint(rset)
+        assert lset.union(rset) == self.orbitals
+        return tuple(sorted((lset, rset), key=len))
 
 
 def read_h5(filename):
