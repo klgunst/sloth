@@ -1,4 +1,4 @@
-Some notes about pyT3NS
+Some notes about sloth
 ========================
 
 A sloth is slowly moving through a tree.
