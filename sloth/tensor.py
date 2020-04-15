@@ -555,7 +555,7 @@ class Tensor:
                 raise ValueError('For SVD with no leg only allowed for '
                                  'calculating the singular values themselves.')
 
-            S = {'Symmetries': self.symmetries}
+            S = {'symmetries': self.symmetries}
             Ucid = 0 if Scid != 0 else 1
             Vcid = 2 if Scid != 2 else 1
 
