@@ -1,4 +1,6 @@
+import networkx
 import numpy as np
+import sloth.couplings as slcp
 
 _SYMMETRIES = ['fermionic', 'U(1)', 'SU(2)', 'C1', 'Ci', 'C2', 'Cs', 'D2',
                'C2v', 'C2h', 'D2h', 'seniority']
@@ -81,6 +83,8 @@ class Tensor:
             self._internallegs = None
             self._indexes = None
             return
+        if self._coupling is not None:
+            raise AttributeError('Can\'t reinit a coupling')
 
         if not isinstance(coupling[0][0], (list, tuple)):
             coupling = (coupling,)
@@ -132,6 +136,16 @@ class Tensor:
     @property
     def symmetries(self):
         return self._symmetries
+
+    def get_couplingnetwork(self):
+        network = networkx.MultiDiGraph()
+        network.add_nodes_from(self.coupling)
+        for ll in self.internallegs:
+            incoupl = [c for c in self.coupling if (ll, True) in c]
+            outcoupl = [c for c in self.coupling if (ll, False) in c]
+            assert len(incoupl) == 1 and len(outcoupl) == 1
+            network.add_edge(outcoupl[0], incoupl[0], leg=ll)
+        return network
 
     def __repr__(self):
         d = {k: v for k, v in self.__dict__.items() if k != '_data'}
@@ -205,9 +219,35 @@ class Tensor:
         return tuple(tuple((dic.get(x, x), y)
                            for x, y in z) for z in self.coupling)
 
+    def copy(self):
+        """copy metadata
+        """
+        return Tensor(self.symmetries, coupling=self.coupling)
+
     def __matmul__(self, B):
         """Trying to completely contract self and B for all matching bonds.
         """
+        if isinstance(B, dict):
+            X = self.copy()
+
+            if B['leg'] not in X.indexes:
+                raise ValueError('Leg of singular values not an indexes '
+                                 'of self')
+
+            if not B['leg'].pref or not B['leg'].phase:
+                raise NotImplementedError
+
+            if B['symmetries'] != X.symmetries:
+                raise ValueError('Not same symmetries')
+
+            x, y = X.coupling_id(B['leg'])
+            for k in self:
+                newshape = [1] * len(self[k].shape)
+                newshape[X.indexes.index(B['leg'])] = -1
+                X[k] = self[k] * B[k[x][y]].reshape(newshape)
+
+            return X
+
         connections = self.connections(B)
         if not connections:
             raise ValueError(f'No connections found between {self} and {B}')
@@ -304,7 +344,7 @@ class Tensor:
                     ndata[nkey] = prefactor * self[okey]
         self._data = ndata
 
-    def coupling_swap(self, cid, permute):
+    def couplingswap0(self, cid, permute):
         """
         Permutes the indices in a given coupling.
 
@@ -319,8 +359,8 @@ class Tensor:
 
         oc = self.coupling[cid]
         sc = tuple(oc[p] for p in permute)
-        self.coupling = tuple(sc if i == cid else c for i, c in
-                              enumerate(self.coupling))
+        self._coupling = tuple(sc if i == cid else c for i, c in
+                               enumerate(self.coupling))
 
         def mappingf(okey):
             yield tuple(
@@ -364,6 +404,89 @@ class Tensor:
         def prefactorf(okey, nkey):
             # return 1. for empty array
             return np.prod([fpref(*[k[ii] for k in okey]) for ii in fids])
+
+        self._manipulate_coupling(mappingf, prefactorf)
+
+    def couplingswap1(self, leg1, leg2):
+        """Switches two legs between two neighbouring couplings.
+        """
+        cid1, cid2 = self.coupling_id(leg1), self.coupling_id(leg2)
+        if cid1[0] == cid2[0]:
+            # Actually swapping between same coupling
+            permute = [0, 1, 2]
+            permute[cid1[1]], permute[cid2[1]] = \
+                permute[cid1[1]], permute[cid2[1]]
+            self.couplingswap0(cid1[0], permute)
+            return
+
+        # Get the connecting leg between the two couplings
+        intersect = set(x[0] for x in self.coupling[cid1[0]]).intersection(
+            set(x[0] for x in self.coupling[cid2[0]]))
+        assert len(intersect) == 1
+        ileg = intersect.pop()
+        cidi = [[x[0] for x in self.coupling[cid]].index(ileg)
+                for cid in (cid1[0], cid2[0])]
+        assert cidi[0] != cid1[1]
+        assert cidi[1] != cid2[1]
+        assert self.coupling[cid1[0]][cidi[0]][1] is not \
+            self.coupling[cid2[0]][cidi[1]][1]
+
+        # Should order such that first bond is in the one with out
+        if self.coupling[cid1[0]][cidi[0]][1]:
+            cid1, cid2 = cid2, cid1
+            cidi = (cidi[1], cidi[0])
+
+        coupling = list(list(sc) for sc in self.coupling)
+        coupling[cid1[0]][cid1[1]], coupling[cid2[0]][cid2[1]] = \
+            coupling[cid2[0]][cid2[1]], coupling[cid1[0]][cid1[1]]
+        self._coupling = tuple(tuple(sc) for sc in coupling)
+        flow1, flow2 = [tuple(el[1] for el in self.coupling[i])
+                        for i, j in (cid1, cid2)]
+
+        def mappingf(okey):
+            tmp = list(list(e) for e in okey)
+            tmp[cid1[0]][cid1[1]], tmp[cid2[0]][cid2[1]] = \
+                tmp[cid2[0]][cid2[1]], tmp[cid1[0]][cid1[1]]
+
+            for coup1 in slcp.allowed_couplings(tmp[cid1[0]], flow1, cidi[0],
+                                                self.symmetries):
+                tmp[cid1[0]][cidi[0]] = coup1
+                tmp[cid2[0]][cidi[1]] = coup1
+                if slcp.is_allowed_coupling(
+                        tmp[cid2[0]], flow2, self.symmetries):
+                    yield tuple(tuple(e) for e in tmp)
+
+        # Fermionic prefactors for all different permutations
+        # internal index in flattened
+        ia, ib = cidi[0], cidi[1] + 3
+        # swapped index in flattened
+        sa, sb = cid1[1], cid2[1]
+
+        def fpref(okey, nkey):
+            assert okey[ia] == okey[ib]
+            assert nkey[ia] == nkey[ib]
+            # Bring the internals next to each other as <x||x>
+            parity = sum(okey[ia + 1:ib]) * okey[ia]
+            # Afterwards bring back to original position
+            parity += sum(nkey[ia + 1:ib]) * nkey[ia]
+            # Move te last switched leg over the first one
+            parity += sum(nkey[sa:sb]) * nkey[sb]
+            # Move te first switched leg to the position of the last one
+            parity += sum(nkey[sa + 1:sb]) * nkey[sa]
+            return -1. if parity % 2 == 1 else 1.
+
+        fids = tuple(ii for ii, ss in enumerate(self.symmetries)
+                     if ss == 'fermionic')
+
+        if 'SU(2)' in self.symmetries:
+            raise NotImplementedError
+
+        def prefactorf(okey, nkey):
+            # return 1. for empty array
+            ofl = [el for i in (cid1[0], cid2[0]) for el in okey[i]]
+            nfl = [el for i in (cid1[0], cid2[0]) for el in nkey[i]]
+            return np.prod([fpref([o[ii] for o in ofl], [n[ii] for n in nfl])
+                            for ii in fids])
 
         self._manipulate_coupling(mappingf, prefactorf)
 
@@ -534,11 +657,96 @@ class Tensor:
 
             compute_uv: False if only the singular values are needed.
         """
+        # TODO: Can I do this shit cleaner?
+        from networkx.algorithms.components import is_connected, \
+            number_connected_components, connected_components
 
         if leg:
             if leg not in self.internallegs:
                 raise ValueError('Leg is not an internal one')
+            if not leg.pref or not leg.phase:
+                raise ValueError('Internal leg needs phase and prefactor')
+
+            U = Tensor(self.symmetries)
+            V = Tensor(self.symmetries)
+            S = {'symmetries': self.symmetries, 'leg': leg}
+
+            lcid = self.coupling_id(leg)
+            Skeys = set(key[lcid[0]][lcid[1]] for key in self)
+
+            netw = self.get_couplingnetwork()
+            assert is_connected(netw.to_undirected())
+            for u, v, ll in netw.edges(data='leg'):
+                if leg == ll:
+                    netw.remove_edge(u, v)
+                    break
+            assert number_connected_components(netw.to_undirected()) == 2
+            coupls = [tuple(c for c in G)
+                      for G in connected_components(netw.to_undirected())]
+            Uid = [True in [(leg, False) in c for c in coupl]
+                   for coupl in coupls].index(True)
+            Vid = [True in [(leg, True) in c for c in coupl]
+                   for coupl in coupls].index(True)
+            assert Uid != Vid
+
+            U.coupling = coupls[Uid]
+            V.coupling = coupls[Vid]
+
+            assert leg in U.indexes and leg in V.indexes
+            U._indexes.remove(leg)
+            U._indexes.append(leg)
+            V._indexes.remove(leg)
+            V._indexes.insert(0, leg)
+
+            permindexes = U.indexes[:-1] + V.indexes[1:]
+            assert set(permindexes) == set(self.indexes)
+            transp = np.array([self.indexes.index(ll) for ll in permindexes])
+            Uids = transp[:len(U.indexes) - 1]
+            Vids = transp[len(U.indexes) - 1:]
+            Umap = [self.coupling.index(c) for c in U.coupling]
+            Vmap = [self.coupling.index(c) for c in V.coupling]
+
+            for Skey in Skeys:
+                dict_part = {k: b for k, b in self.iterate([Skey], [lcid])}
+                Uslice, Ucur = {}, 0
+                Vslice, Vcur = {}, 0
+                for k, b in dict_part.items():
+                    Ukey = tuple([k[i] for i in Umap])
+                    Vkey = tuple([k[i] for i in Vmap])
+
+                    if Ukey not in Uslice:
+                        Udims = [b.shape[ii] for ii in Uids]
+                        Ud = np.prod(Udims)
+                        Uslice[Ukey] = slice(Ucur, Ucur + Ud), Udims
+                        Ucur += Ud
+                    if Vkey not in Vslice:
+                        Vdims = [b.shape[ii] for ii in Vids]
+                        Vd = np.prod(Vdims)
+                        Vslice[Vkey] = slice(Vcur, Vcur + Vd), Vdims
+                        Vcur += Vd
+
+                memory = np.zeros((Ucur, Vcur))
+
+                for k, b in dict_part.items():
+                    Ukey = tuple([k[i] for i in Umap])
+                    Vkey = tuple([k[i] for i in Vmap])
+                    uslice, _ = Uslice[Ukey]
+                    vslice, _ = Vslice[Vkey]
+                    ud = uslice.stop - uslice.start
+                    vd = vslice.stop - vslice.start
+                    memory[uslice, vslice] = \
+                        np.transpose(b, transp).reshape(ud, vd)
+
+                # Finally do SVD
+                u, S[Skey], v = np.linalg.svd(memory, full_matrices=False)
+                for key, (sl, dims) in Uslice.items():
+                    U[key] = u[sl, :].reshape(*dims, -1)
+                for key, (sl, dims) in Vslice.items():
+                    V[key] = v[:, sl].reshape(-1, *dims)
+
+            return U, S, V
         else:
+            # Plain svd of a R matrix. Only calculates the singular values
             if len(self.coupling) != 1:
                 raise ValueError(
                     'For SVD with no leg specified, the tensor should be a '

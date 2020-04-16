@@ -183,16 +183,36 @@ class TNS(nx.MultiDiGraph):
     def contracted_nodes(self, A, B):
         """Contracts two nodes of a given graph and returns the resulting
         graph.
+
+        If singular values live on the leg in between than these are also
+        contracted
         """
         if A not in nx.all_neighbors(self, B):
             raise ValueError(
                 'The two tensors are not neighbours in the network')
 
-        T = A @ B
+        data = self.to_undirected(as_view=True).edges[A, B, 0]
+        if 'singular values' in data:
+            C = A @ data['singular values']
+        else:
+            C = A
+        T = C @ B
         result = TNS(tuple(T if n == A else n for n in self if n != B))
 
         result.name_loose_edges_from([[ll, name] for ll, (_, name) in
                                       self._loose_legs.items() if name])
+
+        for u, v, k, data in self.edges(data=True, keys=True):
+            if 'singular values' in data:
+                if u in (A, B) and v in (A, B) and k == 0:
+                    # This singular values should not be added
+                    continue
+
+                u = T if u in (A, B) else u
+                v = T if v in (A, B) else v
+                result.edges[u, v, k]['singular values'] = \
+                    data['singular values']
+
         return result, T
 
     def boundaries(self):
@@ -209,7 +229,7 @@ class TNS(nx.MultiDiGraph):
     def contract(self, pass_intermediates=False):
         """Fully contracts the network. Is not necessarily efficient.
         """
-        netw = TNS(self)
+        netw = self
         if pass_intermediates:
             interm = []
 
@@ -244,6 +264,22 @@ class TNS(nx.MultiDiGraph):
         if intermittent_renorm:
             R /= np.linalg.norm(R.ravel())
         return tns, (Q, R)
+
+    def svd(self, node, leg):
+        """Does an SVD on a node along the internal leg.
+
+        The singular values are saved on the leg itself and also returned.
+        """
+        tns = TNS(T for T in self if T != node)
+        U, S, V = node.svd(leg, compute_uv=True)
+        tns.add_nodes_from((U, V))
+
+        # TODO: Should do this in another way
+        tns.edges[U, V, 0]['singular values'] = S
+
+        tns.name_loose_edges_from([[ll, name] for ll, (_, name) in
+                                   self._loose_legs.items()])
+        return tns, U, S, V
 
     def move_orthogonality_center(self, nodeA, nodeB, pass_interm=False):
         """Moves the orthogonality center from nodeA to nodeB.
@@ -332,6 +368,20 @@ class TNS(nx.MultiDiGraph):
         assert lset.isdisjoint(rset)
         assert lset.union(rset) == self.orbitals
         return tuple(sorted((lset, rset), key=len))
+
+    def disentangle(self, node_iterator=None):
+        """General swapping of indexes of two neighbouring tensors.
+
+        node_iterator should return the neighbouring nodes to contract every
+        step. If none it just sweeps and does whatever it feels like
+        """
+        raise NotImplementedError
+        tns = self
+        # if node_iterator is None:
+        #    node_iterator = _simple_sweep_model
+
+        for A, B in node_iterator(tns):
+            tns, T = tns.contracted_nodes(A, B)
 
 
 def read_h5(filename):
