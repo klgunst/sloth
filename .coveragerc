@@ -1,0 +1,7 @@
+[report]
+omit =
+    setup.py
+    sloth/__main__.py
+    sloth/_version.py
+    versioneer.py
+    tests/*
