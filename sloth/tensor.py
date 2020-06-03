@@ -57,8 +57,8 @@ class Tensor:
         if invalids:
             raise ValueError(f'Invalid symmetries inputted: {invalids}')
 
-        symmetries = list(symmetries)
-        symmetries.sort(reverse=True)
+        # symmetries = list(symmetries)
+        # symmetries.sort(reverse=True)
         self._symmetries = tuple(symmetries)
         self._coupling = None
         self.coupling = coupling
@@ -636,13 +636,16 @@ class Tensor:
             Aspl = np.cumsum(np.array([r.shape[0] for r in Aarr[:-1]]))
 
             q, r = np.linalg.qr(np.vstack(Aarr))
+            newlead = q.shape[-1]
             r = np.expand_dims(r, axis=1)
             R[((key, vacuum, key),)] = r.T if ingoing else r
 
             # moving back all the blocks into the original tensor
             for block, x in zip(blocks, np.split(q, Aspl)):
-                Q[block] = np.transpose(
-                    x.reshape(np.array(self[block].shape)[transp]), i_transp)
+                new_shape = np.array(self[block].shape)[transp]
+                assert new_shape[-1] == leading_dim
+                new_shape[-1] = newlead
+                Q[block] = np.transpose(x.reshape(new_shape), i_transp)
 
         return Q, R
 

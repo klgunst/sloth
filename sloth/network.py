@@ -367,7 +367,8 @@ class TNS(nx.MultiDiGraph):
 
         assert lset.isdisjoint(rset)
         assert lset.union(rset) == self.orbitals
-        return tuple(sorted((lset, rset), key=len))
+        return lset, rset
+        # return tuple(sorted((lset, rset), key=len))
 
     def disentangle(self, node_iterator=None):
         """General swapping of indexes of two neighbouring tensors.
