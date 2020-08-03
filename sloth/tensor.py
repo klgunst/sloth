@@ -1,6 +1,6 @@
 import networkx
 import numpy as np
-import sloth.couplings as slcp
+import sloth.symmetries as sls
 
 _SYMMETRIES = ['fermionic', 'U(1)', 'SU(2)', 'C1', 'Ci', 'C2', 'Cs', 'D2',
                'C2v', 'C2h', 'D2h', 'seniority']
@@ -136,6 +136,9 @@ class Tensor:
     @property
     def symmetries(self):
         return self._symmetries
+
+    def get_legs(self):
+        return [[x[0] for x in y] for y in self.coupling]
 
     def get_couplingnetwork(self):
         network = networkx.MultiDiGraph()
@@ -328,23 +331,23 @@ class Tensor:
         """General function for manipulation of the coupling
 
         Args:
-            mappingf: Function that maps the old keys to new keys of the tensor
-            prefactorf: Function that gives the prefactor given the old key and
-            new key for the transformation.
+            mappingf: Function that maps the old keys to new keys of the
+            tensor. Should be a generator of the different keys.
+            prefactorf: Function that returns the needed prefactor given the
+            old key and new key for the transformation.
         """
 
         ndata = {}
         for okey in self:
             for nkey in mappingf(okey):
-                prefactor = prefactorf(okey, nkey)
-
+                b = np.multiply(prefactorf(okey, nkey), self[okey])
                 if nkey in ndata:
-                    ndata[nkey] += prefactor * self[okey]
+                    ndata[nkey] += b
                 else:
-                    ndata[nkey] = prefactor * self[okey]
+                    ndata[nkey] = b
         self._data = ndata
 
-    def couplingswap0(self, cid, permute):
+    def _swap0(self, cid, permute):
         """
         Permutes the indices in a given coupling.
 
@@ -352,141 +355,78 @@ class Tensor:
             cid: The coupling id in which to permute.
             permute: Permutation array.
         """
+        from collections import Counter
         permute = tuple(permute)
-        if len(permute) != 3 or 0 not in permute or \
-                1 not in permute or 2 not in permute:
+        if Counter(permute) != Counter(range(3)):
             raise ValueError("Permutation array should be 0, 1, 2 shuffled")
 
-        oc = self.coupling[cid]
-        sc = tuple(oc[p] for p in permute)
-        self._coupling = tuple(sc if i == cid else c for i, c in
-                               enumerate(self.coupling))
+        def permute_key(key):
+            return tuple(tuple(key[cid][p] for p in permute) if i == cid else c
+                         for i, c in enumerate(key))
+
+        self._coupling = permute_key(self.coupling)
 
         def mappingf(okey):
-            yield tuple(
-                tuple(okey[i][p] for p in permute) if i == cid else c
-                for i, c in enumerate(okey)
-            )
+            yield permute_key(okey)
 
-        # Fermionic prefactors for all different permutations
-        def fpref_123(a, b, c):
-            return 1.
-
-        def fpref_213(a, b, c):
-            # a and b are odd
-            return -1. if a & 1 and b % 1 else 1.
-
-        def fpref_132(a, b, c):
-            # b and c are odd
-            return -1. if b & 1 and c % 1 else 1.
-
-        def fpref_321(a, b, c):
-            # |1|(|2| + |3|) + |2||3|
-            return -1. if (a * (b + c) + b * c) & 1 else 1.
-
-        def fpref_312(a, b, c):
-            # |3|(|1| + |2|)
-            return -1. if c * (a + b) & 1 else 1.
-
-        def fpref_231(a, b, c):
-            # |1|(|2| + |3|)
-            return -1. if a * (b + c) & 1 else 1.
-
-        fpref = {(0, 1, 2): fpref_123, (1, 0, 2): fpref_213,
-                 (0, 2, 1): fpref_132, (2, 1, 0): fpref_321,
-                 (2, 0, 1): fpref_312, (1, 2, 0): fpref_231}[permute]
-        fids = tuple(ii for ii, ss in enumerate(self.symmetries)
-                     if ss == 'fermionic')
-
-        if 'SU(2)' in self.symmetries:
-            raise NotImplementedError
+        prefdict = sls._prefswap0(permute)
 
         def prefactorf(okey, nkey):
-            # return 1. for empty array
-            return np.prod([fpref(*[k[ii] for k in okey]) for ii in fids])
+            return np.prod([prefdict[ss](*okey[cid]) if prefdict.get(ss, None)
+                            else 1. for ss in self.symmetries])
 
         self._manipulate_coupling(mappingf, prefactorf)
 
-    def couplingswap1(self, leg1, leg2):
+    def _swap1(self, cids, iids):
         """Switches two legs between two neighbouring couplings.
         """
-        cid1, cid2 = self.coupling_id(leg1), self.coupling_id(leg2)
-        if cid1[0] == cid2[0]:
-            # Actually swapping between same coupling
-            permute = [0, 1, 2]
-            permute[cid1[1]], permute[cid2[1]] = \
-                permute[cid1[1]], permute[cid2[1]]
-            self.couplingswap0(cid1[0], permute)
-            return
+        # The coupling indexes of the two legs to swap
+        c1, c2 = cids
+        # The index of the two legs to swap within the given coupling
+        i1, i2 = iids
+        assert c1 != c2
 
         # Get the connecting leg between the two couplings
-        intersect = set(x[0] for x in self.coupling[cid1[0]]).intersection(
-            set(x[0] for x in self.coupling[cid2[0]]))
-        assert len(intersect) == 1
+        legs = self.get_legs()
+        intersect = set(legs[c1]).intersection(set(legs[c2]))
+
+        assert len(intersect) == 1  # Only one internal leg between couplings
         ileg = intersect.pop()
-        cidi = [[x[0] for x in self.coupling[cid]].index(ileg)
-                for cid in (cid1[0], cid2[0])]
-        assert cidi[0] != cid1[1]
-        assert cidi[1] != cid2[1]
-        assert self.coupling[cid1[0]][cidi[0]][1] is not \
-            self.coupling[cid2[0]][cidi[1]][1]
+        # index of the internal leg in c1 and c2
+        ii = [legs[cid].index(ileg) for cid in cids]
 
-        # Should order such that first bond is in the one with out
-        if self.coupling[cid1[0]][cidi[0]][1]:
-            cid1, cid2 = cid2, cid1
-            cidi = (cidi[1], cidi[0])
+        assert ii[0] != c1 and ii[1] != c2
+        # Check that the flow is consistent along the internal bond
+        assert self.coupling[c1][ii[0]][1] is not self.coupling[c2][ii[1]][1]
 
-        coupling = list(list(sc) for sc in self.coupling)
-        coupling[cid1[0]][cid1[1]], coupling[cid2[0]][cid2[1]] = \
-            coupling[cid2[0]][cid2[1]], coupling[cid1[0]][cid1[1]]
-        self._coupling = tuple(tuple(sc) for sc in coupling)
-        flow1, flow2 = [tuple(el[1] for el in self.coupling[i])
-                        for i, j in (cid1, cid2)]
+        # Order such that first bond is in the one with out
+        if self.coupling[c1][ii[0]][1]:
+            c1, c2, i1, i2, ii = c2, c1, i2, i1, (ii[1], ii[0])
+        assert not self.coupling[c1][ii[0]][1] and self.coupling[c2][ii[1]][1]
+        f1, f2 = ([x[1] for x in self.coupling[c]] for c in (c1, c2))
+
+        def permute_key(key):
+            copy = list(list(k) for k in key)
+            copy[c1][i1], copy[c2][i2] = copy[c2][i2], copy[c1][i1]
+            return copy
+        self._coupling = permute_key(self.coupling)
 
         def mappingf(okey):
-            tmp = list(list(e) for e in okey)
-            tmp[cid1[0]][cid1[1]], tmp[cid2[0]][cid2[1]] = \
-                tmp[cid2[0]][cid2[1]], tmp[cid1[0]][cid1[1]]
+            nk = permute_key(okey)
+            # All good interal symmetry sectors in for the swapped 1st coupling
+            for k in sls.allowed_couplings(nk[c1], f1, ii[0], self.symmetries):
+                # Assign the key of the internal leg
+                nk[c1][ii[0]], nk[c2][ii[1]] = k, k
+                if sls.is_allowed_coupling(nk[c2], f2, self.symmetries):
+                    yield tuple(tuple(e) for e in nk)
 
-            for coup1 in slcp.allowed_couplings(tmp[cid1[0]], flow1, cidi[0],
-                                                self.symmetries):
-                tmp[cid1[0]][cidi[0]] = coup1
-                tmp[cid2[0]][cidi[1]] = coup1
-                if slcp.is_allowed_coupling(
-                        tmp[cid2[0]], flow2, self.symmetries):
-                    yield tuple(tuple(e) for e in tmp)
-
-        # Fermionic prefactors for all different permutations
-        # internal index in flattened
-        ia, ib = cidi[0], cidi[1] + 3
-        # swapped index in flattened
-        sa, sb = cid1[1], cid2[1]
-
-        def fpref(okey, nkey):
-            assert okey[ia] == okey[ib]
-            assert nkey[ia] == nkey[ib]
-            # Bring the internals next to each other as <x||x>
-            parity = sum(okey[ia + 1:ib]) * okey[ia]
-            # Afterwards bring back to original position
-            parity += sum(nkey[ia + 1:ib]) * nkey[ia]
-            # Move te last switched leg over the first one
-            parity += sum(nkey[sa:sb]) * nkey[sb]
-            # Move te first switched leg to the position of the last one
-            parity += sum(nkey[sa + 1:sb]) * nkey[sa]
-            return -1. if parity % 2 == 1 else 1.
-
-        fids = tuple(ii for ii, ss in enumerate(self.symmetries)
-                     if ss == 'fermionic')
-
-        if 'SU(2)' in self.symmetries:
-            raise NotImplementedError
+        prefdict = sls._prefswap1((i1, i2), ii)
 
         def prefactorf(okey, nkey):
-            # return 1. for empty array
-            ofl = [el for i in (cid1[0], cid2[0]) for el in okey[i]]
-            nfl = [el for i in (cid1[0], cid2[0]) for el in nkey[i]]
-            return np.prod([fpref([o[ii] for o in ofl], [n[ii] for n in nfl])
-                            for ii in fids])
+            return np.prod([prefdict.get(ss, lambda x, y: 1.)(
+                [el[i] for j in (c1, c2) for el in okey[j]],
+                [el[i] for j in (c1, c2) for el in nkey[j]]
+            ) for i, ss in enumerate(self.symmetries)])
 
         self._manipulate_coupling(mappingf, prefactorf)
 
