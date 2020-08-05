@@ -12,26 +12,12 @@ class Leg:
     Attrs:
         id: The index of the leg
         These two are only viable for SU(2) tensors.
-            phase: Possible presence of the $(-1)^{j - m}$ phase on the leg.
-            pref: Possible presence of the $[j]$ prefactor on the leg.
     """
-    def __init__(self, phase=False, pref=False, vacuum=False, leg=None):
+    def __init__(self, vacuum=False, leg=None):
         if leg is None:
-            self._phase = phase
-            self._pref = pref
             self._vacuum = vacuum
         else:
-            self._phase = leg.phase
-            self._pref = leg.pref
             self._vacuum = leg.vacuum
-
-    @property
-    def phase(self):
-        return self._phase
-
-    @property
-    def pref(self):
-        return self._pref
 
     @property
     def vacuum(self):
@@ -40,9 +26,6 @@ class Leg:
     def __repr__(self):
         return f"<{str(self.__class__)[8:-2]} object at {hex(id(self))}:" + \
             f"({self.__dict__})>"
-
-    def same(self, leg):
-        return self.phase == leg.phase and self.pref == leg.pref
 
 
 class Tensor:
@@ -132,6 +115,9 @@ class Tensor:
             raise ValueError('Leg not an outer leg')
         x, y = self.coupling_id(leg)
         return self.coupling[x][y][1]
+
+    def getSymmIds(self, symm):
+        return [i for i, s in enumerate(self.symmetries) if s == symm]
 
     @property
     def symmetries(self):
@@ -237,9 +223,6 @@ class Tensor:
                 raise ValueError('Leg of singular values not an indexes '
                                  'of self')
 
-            if not B['leg'].pref or not B['leg'].phase:
-                raise NotImplementedError
-
             if B['symmetries'] != X.symmetries:
                 raise ValueError('Not same symmetries')
 
@@ -289,10 +272,6 @@ class Tensor:
                 raise ValueError(
                     f'Contraction over {l1}, {l2} clashes for the flow,'
                     'I could fix this by automatically inserting a vacuum')
-
-            if not l1.same(l2):
-                raise ValueError(f'{l1} and {l2} do not have same prefactors '
-                                 'on it. I could probably fix that myself')
 
         C = Tensor(self.symmetries)
 
@@ -449,7 +428,7 @@ class Tensor:
             if vac.vacuum:
                 id0, id1 = self.coupling_id(vac)
                 vac_coupling = self.coupling[id0]
-                fid, sid = [[1, 2], [0, 2], [0, 1]][id1]
+                fid, sid = [x for x in range(3) if x != id1]
                 fleg, sleg = vac_coupling[fid], vac_coupling[sid]
 
                 # Other legs do not have the same flow
@@ -457,26 +436,20 @@ class Tensor:
                     flag = True
                     break
 
-        # No suitable vacuum found do remove.
+        # No suitable vacuum found to remove.
         if not flag:
             return False
 
         def mappingf(okey):
+            assert okey[id0][fid] == okey[id0][sid]
             yield tuple(c for ii, c in enumerate(okey) if ii != id0)
 
-        def fprefactor_1(a, b):
-            return 1.
-
-        def fprefactor_2(a, b):
-            return -1. if a & 1 and b & 1 else 1.
-
-        fpref = fprefactor_1 if fleg[1] else fprefactor_2
-        fids = tuple(ii for ii, ss in enumerate(self.symmetries)
-                     if ss == 'fermionic')
+        prefdict = sls._prefremovevac(id1, [x[1] for x in vac_coupling])
 
         def prefactorf(okey, nkey):
             # return 1. for empty array
-            return np.prod([fpref(*[k[ii] for k in okey]) for ii in fids])
+            return np.prod([prefdict.get(ss, lambda x: 1.)(okey[id0][fid][ii])
+                            for ii, ss in enumerate(self.symmetries)])
 
         self._manipulate_coupling(mappingf, prefactorf)
 
@@ -519,8 +492,7 @@ class Tensor:
     def qr(self, leg):
         """Executes a QR decomposition for one of the legs.
 
-        This leg can not be an internal leg, no prefactors from symmetry
-        sectors needed.
+        This leg can not be an internal leg.
 
         leg is ingoing:
             R will couple as (old leg, vacuum -> new leg)
@@ -541,9 +513,9 @@ class Tensor:
         R = Tensor(self.symmetries)
         Q = Tensor(self.symmetries)
 
-        nleg = Leg(phase=True, pref=True)
-        R.coupling = ((leg, True), (Leg(vacuum=True), True), (nleg, False)) if\
-            ingoing else ((nleg, True), (Leg(vacuum=True), True), (leg, False))
+        nleg = Leg()
+        R.coupling = ((Leg(vacuum=True), True), (leg, True), (nleg, False)) if\
+            ingoing else ((Leg(vacuum=True), True), (nleg, True), (leg, False))
 
         Q.coupling = self.substitutelegs([leg], [nleg])
         Q._indexes = tuple(i if i != leg else nleg for i in self.indexes)
@@ -558,34 +530,49 @@ class Tensor:
         transp = np.array(transp)
         i_transp = np.argsort(transp)
 
+        SU2_ids = self.getSymmIds('SU(2)')
+        internals = [
+            (ii, jj) for ii, c in enumerate(self.coupling)
+            for jj, (l, f) in enumerate(c) if l in self.internallegs and f]
+
+        # For scaling of the internal legs
+        def ipref(key):
+            if SU2_ids:
+                return np.prod([np.sqrt(key[x][y][i] + 1)
+                                for (x, y) in internals for i in SU2_ids])
+            else:
+                return 1.
+
         for key in keys:
-            blocks = [k for k in self if k[i1][i2] == key]
+            lpref = np.prod([np.sqrt(key[i] + 1) for i in SU2_ids])
+            blocks = [(k, ipref(k)) for k in self if k[i1][i2] == key]
 
-            leading_dim = set(self[k].shape[f_id] for k in blocks)
+            ldim = set(self[k].shape[f_id] for k, _ in blocks)
             # check if dimension is consistent everywhere
-            assert len(leading_dim) == 1
-            leading_dim = leading_dim.pop()
+            assert len(ldim) == 1
+            ldim = ldim.pop()
 
-            size = sum(self[k].size for k in blocks)
-            assert size % leading_dim == 0
+            size = sum(self[k].size for k, _ in blocks)
+            assert size % ldim == 0
 
             # Moving all needed blocks into one matrix
-            Aarr = [np.transpose(self[block], transp).reshape(-1, leading_dim)
-                    for block in blocks]
+            Aarr = [np.transpose(self[block], transp).reshape(-1, ldim) / pref
+                    for block, pref in blocks]
 
             Aspl = np.cumsum(np.array([r.shape[0] for r in Aarr[:-1]]))
 
             q, r = np.linalg.qr(np.vstack(Aarr))
             newlead = q.shape[-1]
-            r = np.expand_dims(r, axis=1)
-            R[((key, vacuum, key),)] = r.T if ingoing else r
+            thiskey = ((vacuum, key, key),)
+            R[thiskey] = np.expand_dims((r.T if ingoing else r), axis=0)
 
             # moving back all the blocks into the original tensor
-            for block, x in zip(blocks, np.split(q, Aspl)):
+            for (block, pref), x in zip(blocks, np.split(q, Aspl)):
                 new_shape = np.array(self[block].shape)[transp]
-                assert new_shape[-1] == leading_dim
+                assert new_shape[-1] == ldim
                 new_shape[-1] = newlead
-                Q[block] = np.transpose(x.reshape(new_shape), i_transp)
+                Q[block] = pref * lpref * \
+                    np.transpose(x.reshape(new_shape), i_transp)
 
         return Q, R
 
@@ -604,11 +591,10 @@ class Tensor:
         from networkx.algorithms.components import is_connected, \
             number_connected_components, connected_components
 
+        SUid = self.getSymmIds('SU(2)')
         if leg:
             if leg not in self.internallegs:
                 raise ValueError('Leg is not an internal one')
-            if not leg.pref or not leg.phase:
-                raise ValueError('Internal leg needs phase and prefactor')
 
             U = Tensor(self.symmetries)
             V = Tensor(self.symmetries)
@@ -649,7 +635,16 @@ class Tensor:
             Umap = [self.coupling.index(c) for c in U.coupling]
             Vmap = [self.coupling.index(c) for c in V.coupling]
 
+            iU = [U.coupling.index(c) for c in U.internallegs]
+            iV = [V.coupling.index(c) for c in V.internallegs]
+
+            def pref(key, mp):
+                return np.prod(
+                    [np.sqrt(key[x][y][ii] + 1) for ii in SUid for x, y in mp])
+
             for Skey in Skeys:
+                Sprf = np.prod([np.sqrt(Skey[ii] + 1) for ii in SUid])
+
                 dict_part = {k: b for k, b in self.iterate([Skey], [lcid])}
                 Uslice, Ucur = {}, 0
                 Vslice, Vcur = {}, 0
@@ -678,14 +673,16 @@ class Tensor:
                     ud = uslice.stop - uslice.start
                     vd = vslice.stop - vslice.start
                     memory[uslice, vslice] = \
-                        np.transpose(b, transp).reshape(ud, vd)
+                        np.transpose(b, transp).reshape(ud, vd) / \
+                        pref(Ukey, iU) / pref(Vkey, iV)
 
                 # Finally do SVD
-                u, S[Skey], v = np.linalg.svd(memory, full_matrices=False)
+                u, s, v = np.linalg.svd(memory, full_matrices=False)
+                S[Skey] = s / Sprf / Sprf
                 for key, (sl, dims) in Uslice.items():
-                    U[key] = u[sl, :].reshape(*dims, -1)
+                    U[key] = u[sl, :].reshape(*dims, -1) * pref(key, iU) * Sprf
                 for key, (sl, dims) in Vslice.items():
-                    V[key] = v[:, sl].reshape(-1, *dims)
+                    V[key] = v[:, sl].reshape(-1, *dims) * pref(key, iV) * Sprf
 
             return U, S, V
         else:
@@ -710,8 +707,12 @@ class Tensor:
             Ucid = 0 if Scid != 0 else 1
             Vcid = 2 if Scid != 2 else 1
 
+            def prefact(key):
+                return np.prod([np.sqrt(k[ii] + 1) for ii in SUid])
+
             for key, block in self.items():
-                assert key[0][Ucid] == key[0][Vcid]
-                S[key[0][Ucid]] = np.linalg.svd(np.squeeze(block, axis=Sid),
-                                                compute_uv=False)
+                k = key[0][Ucid]
+                assert k == key[0][Vcid]
+                S[k] = np.linalg.svd(np.squeeze(block, axis=Sid) / prefact(k),
+                                     compute_uv=False)
             return S

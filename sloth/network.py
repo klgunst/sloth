@@ -309,9 +309,15 @@ class TNS(nx.MultiDiGraph):
         else:
             return tns, A
 
-    def calculate_singular_values(self, current_ortho):
+    def calculate_singular_values(self, current_ortho=None):
         """Calculates the singular values along **all** internal edges.
+
+        If current orthogonality center is not given it is assumed to be the
+        sink.
         """
+        if not current_ortho:
+            current_ortho = self.sink
+
         svals = {}
         legs_to_visit = self.unique_legs
 
@@ -398,8 +404,7 @@ def read_h5(filename):
     bonds = np.array(h5file['network']['bonds']).reshape(-1, 2)
 
     # make the virtual legs
-    vlegs = [Leg(phase=x != -1, pref=(y != -1 and x != -1), vacuum=x == -1)
-             for x, y in bonds]
+    vlegs = [Leg(vacuum=x == -1) for x, _ in bonds]
     plegs = [Leg() for i in range(h5file['network'].attrs['psites'].item())]
 
     sitetoorb = h5file['network']['sitetoorb']
@@ -414,6 +419,7 @@ def read_h5(filename):
         tbonds = [i for i, x in enumerate(bonds[:, 1]) if x == tid] + \
             ([] if sitetoorb[tid] == -1 else [f'p{sitetoorb[tid]}']) + \
             [i for i, x in enumerate(bonds[:, 0]) if x == tid]
+        isSink = bonds[tbonds[-1], 1] == -1
         assert len(tbonds) == 3
 
         symsecs = tuple(bookie[f'v_symsec_{i}'] if isinstance(i, int) else
@@ -421,6 +427,14 @@ def read_h5(filename):
         coupl = [vlegs[i] if isinstance(i, int) else
                  plegs[int(i[1:])] for i in tbonds]
         A.coupling = [(i, b) for i, b in zip(coupl, [True, True, False])]
+
+        if isSink:
+            SU2_ids = []
+        else:
+            SU2_ids = A.getSymmIds('SU(2)')
+
+        def prefactor(key):
+            return np.prod([np.sqrt(key[0][2][i] + 1) for i in SU2_ids])
 
         # reshaping the irreps bit
         sirr = [np.array(s['irreps']).reshape(
@@ -446,7 +460,8 @@ def read_h5(filename):
             # Have to watch out for that sneaky Fortran order!!
             Ablock = block['tel'][begin:end].reshape(shape, order='F')
             # And now cast everything to a C order and to np.float64
-            A[key] = np.array(Ablock, order='C', dtype=np.float64)
+            A[key] = prefactor(key) * \
+                np.array(Ablock, order='C', dtype=np.float64)
 
     tns = TNS(tensors)
     tns.name_loose_edges_from([[pl, f'p{ii}'] for ii, pl in enumerate(plegs)])

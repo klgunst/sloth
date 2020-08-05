@@ -15,7 +15,7 @@ def flatten_svals(svals):
     def unmultiplet(key, sval):
         # Undo the SU(2)
         multipl = np.prod([key[i] + 1 for i in su2ids])
-        return np.repeat(sval / np.sqrt(multipl), multipl)
+        return np.repeat(sval, multipl)
 
     return np.sort(np.concatenate([unmultiplet(k, v) for k, v in svals.items()
                                    if isinstance(k, tuple)]))[::-1]

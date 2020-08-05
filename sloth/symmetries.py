@@ -57,7 +57,6 @@ def _prefswap1(ll, il):
     """Prefactor for swapping of ll[0] and ll[1] between two couplings where
     the common leg is given by il[0] and il[1] between coupling 0 and 1.
     """
-
     # Fermionic prefactors for all different permutations
     # internal index in flattened
     ia, ib = il[0], il[1] + 3
@@ -120,7 +119,7 @@ def _prefswap1(ll, il):
         from functools import reduce
         w6j = wigner_6j(nk[sb] / 2., nk[rb] / 2., nk[ib] / 2.,
                         nk[sa] / 2., nk[ra] / 2., ok[ia] / 2.)
-        pr = np.sqrt((nk[ia] + 1) * (ok[ia] + 1)) * float(w6j) * \
+        pr = (nk[ia] + 1) * float(w6j) * \
             (1. if (nk[ia] + ok[ia] - ok[sa] - ok[sb]) % 4 == 0 else -1.)
         return reduce(lambda x, y: x * y, [p(ok, nk) for p in pref_funcs], pr)
 
@@ -128,6 +127,25 @@ def _prefswap1(ll, il):
         'fermionic': fpref,
         'SU(2)': lambda x, y: su2pref(x, y, pref_funcs)
     }
+
+
+def _prefremovevac(vacid, flow):
+    """Prefactor for removing a vacuum leg
+    """
+    fid, sid = [x for x in range(3) if x != vacid]
+    assert flow[fid] != flow[sid]
+
+    def fpref(k):
+        return 1. if k % 2 == 0 or flow[fid] else -1.
+
+    inid = fid if flow[fid] else sid
+    phaseNeeded = (inid + 1) % 3 == vacid
+
+    def su2pref(k):
+        return 1. / np.sqrt(k + 1) * \
+            (1. if k % 2 == 0 and not phaseNeeded else -1.)
+
+    return {'fermionic': fpref, 'SU(2)': su2pref}
 
 
 def allowed_couplings(coupling, flow, free_id, symmetries):
@@ -224,45 +242,3 @@ def is_allowed_coupling(coupling, flow, symmetries):
 
     return False not in [constraint[s]([c[ii] for c in coupling], flow)
                          for ii, s in enumerate(symmetries)]
-
-
-def test_is_allowed_coupling():
-    """Testing several cases of allowed couplings.
-    """
-
-    symmetries = ['SU(2)', 'SU(2)', 'fermionic', 'U(1)', 'D2h']
-    flow = [True, False, True]
-    coupling = [
-        [((1, 0, 1, -5, 0), (1, 2, 0, -7, 1), (2, 2, 1, -2, 0 ^ 1)), True],
-        [((1, 0, 1, -5, 0), (1, 2, 0, -7, 1), (0, 2, 1, -2, 0 ^ 1)), True],
-        [((1, 0, 1, -5, 0), (1, 2, 0, -7, 1), (0, 1, 1, -2, 0 ^ 1)), False],
-        [((1, 0, 1, -5, 0), (1, 2, 0, -7, 1), (0, 2, 0, -2, 0 ^ 1)), False],
-        [((1, 0, 1, -5, 0), (1, 2, 0, -7, 1), (0, 2, 1, 2, 0 ^ 1)), False],
-        [((1, 0, 1, -5, 0), (1, 2, 0, -7, 1), (0, 2, 1, -2, 0 ^ 2)), False],
-    ]
-
-    for coupl, expected in coupling:
-        assert is_allowed_coupling(coupl, flow, symmetries) is expected
-
-
-def test_generate_allowed_couplings():
-    symmetries = ['SU(2)', 'SU(2)', 'fermionic', 'U(1)', 'D2h']
-    flow = [True, True, False]
-    coupling = ((3, 5, 1, 5, 0), (2, 2, 1, 3, 1), None)
-
-    allowed = set(
-        ((1, 3, 0, 8, 0 ^ 1),
-         (1, 5, 0, 8, 0 ^ 1),
-         (1, 7, 0, 8, 0 ^ 1),
-         (3, 3, 0, 8, 0 ^ 1),
-         (3, 5, 0, 8, 0 ^ 1),
-         (3, 7, 0, 8, 0 ^ 1),
-         (5, 3, 0, 8, 0 ^ 1),
-         (5, 5, 0, 8, 0 ^ 1),
-         (5, 7, 0, 8, 0 ^ 1))
-    )
-
-    for newcp in allowed_couplings(coupling, flow, 2, symmetries):
-        allowed.remove(newcp)
-
-    assert allowed == set()
