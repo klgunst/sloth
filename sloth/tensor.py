@@ -123,6 +123,45 @@ class Tensor:
     def symmetries(self):
         return self._symmetries
 
+    def isclose(self, A, **kwargs):
+        """Compares two tensors.
+
+        Args:
+            A: The tensor to compare with
+            kwargs: Arguments to pass to np.allclose
+
+        Returns:
+            True if the legs are the same, the symmetries are the same, the
+            coupling is the same and the elements are close to each other.
+        """
+        # Symmetries not the same
+        if self.symmetries != A.symmetries:
+            return False
+
+        # Indexes not necessarily the same order
+        if set(self.indexes) != set(A.indexes):
+            return False
+        permute = tuple(self.indexes.index(x) for x in A.indexes)
+
+        # Coupling should be the same
+        if self.substitutelegs(self.internallegs, A.internallegs) \
+                != A.coupling:
+            return False
+
+        # List of unique keys
+        keys = set(self).union(set(A))
+        for key in keys:
+            try:
+                a = self[key]
+                a = np.transpose(a, axes=permute)
+            except KeyError:
+                a = 0.
+            b = A._data.get(key, 0.)
+
+            if not np.allclose(a, b, **kwargs):
+                return False
+        return True
+
     def get_legs(self):
         return [[x[0] for x in y] for y in self.coupling]
 
@@ -179,6 +218,22 @@ class Tensor:
     def size(self):
         return sum([d.size for _, d in self.items()])
 
+    @property
+    def shape(self):
+        """The dense shape
+        """
+        # dictionaries with the stored dimensions for each key
+        shapes = [{} for x in range(len(self.indexes))]
+        cids = [self.coupling_id(leg) for leg in self.indexes]
+        for k, v in self.items():
+            for cid, shapedict, ii in zip(cids, shapes, range(len(cids))):
+                key = k[cid[0]][cid[1]]
+                if key in shapedict:
+                    assert shapedict[key] == v.shape[ii]
+                else:
+                    shapedict[key] = v.shape[ii]
+        return tuple(sum(x for _, x in d.items()) for d in shapes)
+
     def coupling_id(self, leg):
         """Finds first occurence of leg in the coupling
         """
@@ -205,19 +260,26 @@ class Tensor:
         """
         # making dictionary
         dic = {o: n for o, n in zip(old, new)}
-        return tuple(tuple((dic.get(x, x), y)
-                           for x, y in z) for z in self.coupling)
+        return tuple(
+            tuple((dic.get(x, x), y) for x, y in z) for z in self.coupling)
 
-    def copy(self):
+    def metacopy(self):
         """copy metadata
         """
-        return Tensor(self.symmetries, coupling=self.coupling)
+        X = Tensor(self.symmetries, coupling=self.coupling)
+        X._indexes = [x for x in self.indexes]
+        return X
+
+    def shallowcopy(self):
+        X = self.metacopy()
+        X._data = self._data
+        return X
 
     def __matmul__(self, B):
         """Trying to completely contract self and B for all matching bonds.
         """
         if isinstance(B, dict):
-            X = self.copy()
+            X = self.metacopy()
 
             if B['leg'] not in X.indexes:
                 raise ValueError('Leg of singular values not an indexes '
@@ -351,10 +413,12 @@ class Tensor:
         prefdict = sls._prefswap0(permute)
 
         def prefactorf(okey, nkey):
-            return np.prod([prefdict[ss](*okey[cid]) if prefdict.get(ss, None)
-                            else 1. for ss in self.symmetries])
+            kk = [x for x in zip(*okey[cid])]
+            return np.prod([prefdict[ss](*k) if prefdict.get(ss, None)
+                            else 1. for k, ss in zip(kk, self.symmetries)])
 
         self._manipulate_coupling(mappingf, prefactorf)
+        return self
 
     def _swap1(self, cids, iids):
         """Switches two legs between two neighbouring couplings.
@@ -382,13 +446,13 @@ class Tensor:
         if self.coupling[c1][ii[0]][1]:
             c1, c2, i1, i2, ii = c2, c1, i2, i1, (ii[1], ii[0])
         assert not self.coupling[c1][ii[0]][1] and self.coupling[c2][ii[1]][1]
-        f1, f2 = ([x[1] for x in self.coupling[c]] for c in (c1, c2))
 
         def permute_key(key):
             copy = list(list(k) for k in key)
             copy[c1][i1], copy[c2][i2] = copy[c2][i2], copy[c1][i1]
             return copy
-        self._coupling = permute_key(self.coupling)
+        self._coupling = tuple(tuple(c) for c in permute_key(self.coupling))
+        f1, f2 = ([x[1] for x in self.coupling[c]] for c in (c1, c2))
 
         def mappingf(okey):
             nk = permute_key(okey)
@@ -408,6 +472,7 @@ class Tensor:
             ) for i, ss in enumerate(self.symmetries)])
 
         self._manipulate_coupling(mappingf, prefactorf)
+        return self
 
     def _remove_vacuumcoupling(self):
         """Removes couplings to the vacuum, if the tensor has multiple
@@ -420,7 +485,7 @@ class Tensor:
             If a vacuum has been removed.
         """
         if len(self.coupling) == 1 or \
-                sum([ll.vacuum for ll in self.indexes]) == 0:
+                [ll.vacuum for ll in self.indexes].count(True) == 0:
             return False
 
         flag = False
@@ -495,10 +560,10 @@ class Tensor:
         This leg can not be an internal leg.
 
         leg is ingoing:
-            R will couple as (old leg, vacuum -> new leg)
+            R will couple as (vacuum, old leg -> new leg)
             new leg is R -> Q
         leg is outgoing:
-            R will couple as (new leg, vacuum -> old leg)
+            R will couple as (vacuum, new leg -> old leg)
             new leg is Q -> R
 
         self is appropriately changed

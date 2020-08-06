@@ -2,6 +2,7 @@ from sloth.network import read_h5
 from sloth.utils import flatten_svals
 import numpy as np
 import pickle
+import pytest
 import os
 
 
@@ -17,12 +18,12 @@ def close_paddy(x, y, **kwargs):
     return np.allclose(*ar, **kwargs)
 
 
-def helper_singular_values(netwType):
+@pytest.mark.parametrize("netwType", ["DMRG"])
+def test_singular_values(netwType):
     h5path = os.path.join(os.path.dirname(__file__), 'h5')
     svals = {}
 
     # Obtained from the T3NS C implementation (github.com/klgunst/T3NS)
-
     for kind in ['U1', 'SU2']:
         tns = read_h5(os.path.join(h5path, f'N2_{kind}_{netwType}.h5'))
         svals[kind] = {
@@ -38,7 +39,3 @@ def helper_singular_values(netwType):
     for x, y in svals['U1'].items():
         assert np.isclose(np.linalg.norm(y), 1.)  # Normed tensor network
         assert close_paddy(y, svals['SU2'][x], atol=1e-6)  # similar svals
-
-
-def test_DMRG_singular_values():
-    helper_singular_values('DMRG')

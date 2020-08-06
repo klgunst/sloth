@@ -143,7 +143,7 @@ def _prefremovevac(vacid, flow):
 
     def su2pref(k):
         return 1. / np.sqrt(k + 1) * \
-            (1. if k % 2 == 0 and not phaseNeeded else -1.)
+            (1. if k % 2 == 0 or not phaseNeeded else -1.)
 
     return {'fermionic': fpref, 'SU(2)': su2pref}
 
@@ -240,5 +240,7 @@ def is_allowed_coupling(coupling, flow, symmetries):
         'D2h': pg_constraint
     }
 
-    return False not in [constraint[s]([c[ii] for c in coupling], flow)
-                         for ii, s in enumerate(symmetries)]
+    for c, s in zip(zip(*coupling), symmetries):
+        if constraint[s](c, flow) is False:
+            return False
+    return True
