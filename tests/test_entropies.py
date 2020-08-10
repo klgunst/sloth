@@ -1,6 +1,5 @@
 from sloth.network import read_h5
 from sloth.utils import flatten_svals
-import numpy as np
 import pickle
 import pytest
 import os
@@ -8,21 +7,14 @@ import os
 
 @pytest.fixture()
 def checkvals():
-    with open('N2_svals.pickle', 'rb') as f:
+    picklefile = os.path.join(os.path.dirname(__file__), 'N2_svals.pickle')
+    with open(picklefile, 'rb') as f:
         checkvals = pickle.load(f)
     return checkvals
 
 
-def close_paddy(x, y, **kwargs):
-    """Compares two 1D-arrays and pads the shortest with zeros
-    """
-    maxlen = max(len(x), len(y))
-    ar = [np.pad(z, (0, maxlen - len(z)), mode='constant') for z in (x, y)]
-    return np.allclose(*ar, **kwargs)
-
-
 @pytest.mark.parametrize("netwType", ["DMRG", "T3NS"])
-def test_singular_values(netwType, kind, checkvals):
+def test_singular_values(netwType, kind, checkvals, helpers):
     # Remove '(' and ')'
     kind = kind.replace(')', '').replace('(', '')
     h5path = os.path.join(os.path.dirname(__file__), 'h5')
@@ -35,4 +27,4 @@ def test_singular_values(netwType, kind, checkvals):
     }
     # Check it is the same as check value
     for x, y in checkvals[f'{kind}_{netwType}'].items():
-        assert close_paddy(y, svals[x])  # similar svals
+        assert helpers.close_paddy(y, svals[x])  # similar svals

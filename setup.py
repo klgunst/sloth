@@ -6,6 +6,7 @@ requirements = [
     'numpy>=1.18',
     'h5py>=2.10',
     'networkx>=2.4'
+    'sympy'
 ]
 
 setup(
@@ -18,12 +19,10 @@ setup(
     author_email='klaasgunst@hotmail.com',
     url='https://github.com/klgunst/sloth',
     packages=['sloth'],
-    
+
     install_requires=requirements,
     keywords='sloth',
     classifiers=[
-        'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
     ]
 )

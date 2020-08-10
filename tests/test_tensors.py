@@ -3,16 +3,15 @@ import sloth.symmetries as sls
 import pytest
 import itertools
 import numpy as np
-from test_entropies import close_paddy
 
 
-def svclose(a, b):
+def svclose(a, b, helpers):
     assert a['symmetries'] == b['symmetries']
     assert set(x for x in a if isinstance(x, tuple)) == \
         set(x for x in a if isinstance(x, tuple))
     for k, v in a.items():
         if isinstance(k, tuple):
-            assert close_paddy(a[k], b[k])
+            assert helpers.close_paddy(a[k], b[k])
 
 
 @pytest.fixture()
@@ -78,7 +77,7 @@ class TestTensors:
         U, s, V = A.svd(leg=A.internallegs[0])
         assert A.isclose(U @ s @ V)
 
-    def test_SvalConsistent(self, create_tensors):
+    def test_SvalConsistent(self, create_tensors, helpers):
         A, B = create_tensors
         R = {leg: A.qr(leg)[1] for leg in A.indexes}
         svalQR = {leg: r.svd(compute_uv=False) for leg, r in R.items()}
@@ -89,22 +88,22 @@ class TestTensors:
         for leg in U.indexes:
             sv = U.qr(leg)[1].svd(compute_uv=False)
             if leg == second_con:
-                svclose(sv, svalQR[first_con])
+                svclose(sv, svalQR[first_con], helpers)
             else:
                 svalQR[leg] = sv
 
         # Now making two-site object
         C = A @ B
         U, S, V = C.svd(leg=C.internallegs[0])
-        svclose(S, svalQR[first_con])
+        svclose(S, svalQR[first_con], helpers)
 
         for X in [U @ S, V @ S]:
             for leg in X.indexes:
                 sv = X.qr(leg)[1].svd(compute_uv=False)
                 if leg in svalQR:
-                    svclose(sv, svalQR[leg])
+                    svclose(sv, svalQR[leg], helpers)
 
-    def test_Swap0Consistent(self, create_tensors):
+    def test_Swap0Consistent(self, create_tensors, helpers):
         """Swap of legs of a three-legged tensor
         """
         A, _ = create_tensors
@@ -119,11 +118,12 @@ class TestTensors:
         for p in permutes:
             B = A.shallowcopy()._swap0(0, p)
             for leg in B.indexes:
-                svclose(B.qr(leg)[1].svd(compute_uv=False), svals[leg])
+                svclose(B.qr(leg)[1].svd(compute_uv=False),
+                        svals[leg], helpers)
             assert not B.isclose(A)
             assert A.isclose(B._swap0(0, inv(p)))  # Double swap is the same
 
-    def test_Swap1Consistent(self, create_tensors):
+    def test_Swap1Consistent(self, create_tensors, helpers):
         A, B = create_tensors
 
         # Singular values along loose edges
@@ -146,7 +146,8 @@ class TestTensors:
             # Checking singular values are consistent
             for X in [U @ S, V @ S]:
                 for leg in set(X.indexes).intersection(set(svalQR)):
-                    svclose(X.qr(leg)[1].svd(compute_uv=False), svalQR[leg])
+                    svclose(X.qr(leg)[1].svd(compute_uv=False), svalQR[leg],
+                            helpers)
 
             assert not C.isclose(C2)
             assert C.isclose(C2._swap1(cids, ii))  # Double swap is the same
