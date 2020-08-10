@@ -1,5 +1,6 @@
 from sympy.physics.wigner import wigner_6j
 import numpy as np
+from functools import reduce
 
 
 def _prefswap0(permute):
@@ -116,7 +117,6 @@ def _prefswap1(ll, il):
     rb = rb[0]
 
     def su2pref(ok, nk, pref_funcs):
-        from functools import reduce
         w6j = wigner_6j(nk[sb] / 2., nk[rb] / 2., nk[ib] / 2.,
                         nk[sa] / 2., nk[ra] / 2., ok[ia] / 2.)
         pr = (nk[ia] + 1) * float(w6j) * \
@@ -126,6 +126,65 @@ def _prefswap1(ll, il):
     return {
         'fermionic': fpref,
         'SU(2)': lambda x, y: su2pref(x, y, pref_funcs)
+    }
+
+
+def _prefremoveSimpleLoop(loop, coupling):
+    """
+    For the calculation of the prefactor associated with the removal of a
+    simple loop.
+
+    Returns:
+        dictionary with for each symmetry a function that calculates the
+        associated prefactor.
+    """
+    # The flows of the legs in the couplings
+    f1, f2 = [tuple(c[1] for c in coupling[x]) for x in loop['coupl']]
+    # Check some things
+    assert f1[loop['fid'][0]]
+    assert not f2[loop['fid'][1]]
+    assert f1[loop['lid'][0][0]] is not f2[loop['lid'][0][1]]
+    assert f1[loop['lid'][1][0]] is not f2[loop['lid'][1][1]]
+
+    # slices for fermionic signs
+    # If the leg in the first coupling is outgoing, should overpass each other
+    fsl, ssl = [slice(lid[0] + (not f1[lid[0]]), 3 + lid[1])
+                for lid in loop['lid']]
+
+    def fpref(key):
+        key = list(key)
+        parity = key[loop['lid'][0][0]] * sum(key[fsl])
+        # Removing legs is same as setting their keys to zero
+        key[loop['lid'][0][0]] = 0
+        key[loop['lid'][0][1] + 3] = 0
+        parity += key[loop['lid'][1][0]] * sum(key[ssl])
+        return 1. if parity % 2 == 0 else -1.
+
+    su2preff = [lambda k, x=x: 1. if k[x] % 2 == 0 else -1.
+                for x, _ in loop['lid'] if f1[x]]
+
+    # one reflect of coupling needed?
+    assert (((loop['lid'][0][0] + 1) % 3 == loop['fid'][0])
+            == ((loop['lid'][0][1] + 1) % 3 == loop['fid'][1])) \
+        == (((loop['lid'][1][0] + 1) % 3 == loop['fid'][0])
+            == ((loop['lid'][1][1] + 1) % 3 == loop['fid'][1]))
+
+    if ((loop['lid'][0][0] + 1) % 3 == loop['fid'][0]) == \
+            ((loop['lid'][0][1] + 1) % 3 == loop['fid'][1]):
+        su2preff.append(lambda x: 1. if sum(x) % 4 == 0 else -1.)
+
+    sign = tuple(1 if ii != loop['fid'][0] else -1 for ii in range(3))
+
+    def su2ortho(k):
+        # Orthogonality equation taking into account the insertion of a vacuum
+        m = 1. / np.sqrt(k[loop['fid'][0]] + 1)
+        return m if sum(s * x for s, x in zip(sign, k)) % 4 == 0 else -m
+    su2preff.append(su2ortho)
+
+    return {
+        'fermionic': fpref,
+        'SU(2)': lambda k: reduce(lambda x, y: x * y,
+                                  [p(k[:3]) for p in su2preff])
     }
 
 
@@ -145,6 +204,41 @@ def _prefremovevac(vacid, flow):
         return 1. / np.sqrt(k + 1) * \
             (1. if k % 2 == 0 or not phaseNeeded else -1.)
 
+    return {'fermionic': fpref, 'SU(2)': su2pref}
+
+
+def _prefAdj(coupling, leg):
+    """Prefactor for the creation of an adjoint
+
+    Only implemented for regular three-legged tensors with an (in, in, out)
+    flow and their adjoints at the moment.
+    """
+    if len(coupling) != 1:
+        raise NotImplementedError("Only for three-legged tensors")
+
+    flow = tuple(c[1] for c in coupling[0])
+    if flow != (True, True, False) and flow != (True, False, False):
+        raise NotImplementedError("Only (in, in, out) and its adjoint allowed")
+
+    if flow == (True, False, False):
+        def loop(x):
+            return x[::-1]
+    else:
+        def loop(x):
+            return x
+    fid = [c[0] for c in loop(coupling[0])].index(leg) if leg else None
+
+    fpref = {
+        0: lambda key: 1. if loop(key[0])[1] % 2 == 0 else -1.,
+        1: lambda key: 1. if loop(key[0])[0] % 2 == 0 else -1.,
+        2: lambda key: 1.,
+        None: lambda key: 1. if loop(key[0])[2] % 2 == 0 else -1.,
+    }[fid]
+
+    def su2pref(key):
+        sign = (1, 1, -1)
+        return 1. if sum(s * k for s, k in
+                         zip(sign, loop(key[0]))) % 4 == 0 else -1.
     return {'fermionic': fpref, 'SU(2)': su2pref}
 
 
@@ -244,3 +338,9 @@ def is_allowed_coupling(coupling, flow, symmetries):
         if constraint[s](c, flow) is False:
             return False
     return True
+
+
+def vacuumIrrep(symmetries):
+    """Returns the vacuum Irrep
+    """
+    return (0,) * len(symmetries)

@@ -438,8 +438,7 @@ def read_h5(filename):
 
         # reshaping the irreps bit
         sirr = [np.array(s['irreps']).reshape(
-            s.attrs['nrSecs'].item(), -1)[:, :len(sym)] for s in symsecs
-                ]
+            s.attrs['nrSecs'].item(), -1)[:, :len(sym)] for s in symsecs]
 
         def get_ids(qn):
             dims = np.array([s.attrs['nrSecs'].item() for s in symsecs],

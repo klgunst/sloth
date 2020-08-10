@@ -15,7 +15,7 @@ def svclose(a, b, helpers):
 
 
 @pytest.fixture()
-def create_tensors(kind):
+def create_tensors(symmetr):
     """Create a pair of tensors whith one leg common with either
     PxU(1)xU(1) or PxU(1)xSU(2) symmetry
     """
@@ -24,7 +24,7 @@ def create_tensors(kind):
     def make_random_l(nrirs, maxd):
         """Make legs with random dimensions
         """
-        return Leg(), [(k, rng.integers(0, maxd, endpoint=True))
+        return Leg(), [(k, rng.integers(1, maxd, endpoint=True))
                        for k in itertools.product(*[range(x) for x in nrirs])]
 
     def make_random_t(symmetr, legs, flow):
@@ -39,13 +39,17 @@ def create_tensors(kind):
                 A[key] = rng.uniform(low=-1.0, high=1.0, size=shape)
         return A
 
-    symmetries = ['fermionic', 'U(1)', kind]
-    legs = [make_random_l([2, 5, 5], 5) for x in range(5)]
+    mirrep = {
+        'fermionic': 2,
+        'SU(2)': 5,
+        'U(1)': 5
+    }
+    legs = [make_random_l([mirrep[s] for s in symmetr], 5) for x in range(5)]
     flow = [True, True, False]
     # orthogonalized
-    T, R = make_random_t(symmetries, legs[2:], flow).qr(legs[2][0])
+    T, R = make_random_t(symmetr, legs[2:], flow).qr(legs[2][0])
     # Ortho center
-    S = make_random_t(symmetries, legs[:3], flow) @ R
+    S = make_random_t(symmetr, legs[:3], flow) @ R
     S *= 1. / S.norm()
     return S, T
 
@@ -82,7 +86,7 @@ class TestTensors:
         R = {leg: A.qr(leg)[1] for leg in A.indexes}
         svalQR = {leg: r.svd(compute_uv=False) for leg, r in R.items()}
 
-        first_con = A.connections(B)[0]
+        first_con = A.connections(B).pop()
         U = R[first_con] @ B
         second_con = [x for x in U.indexes if x not in B.indexes][0]
         for leg in U.indexes:
@@ -129,7 +133,7 @@ class TestTensors:
         # Singular values along loose edges
         R = {leg: A.qr(leg)[1] for leg in A.indexes}
         svalQR = {leg: r.svd(compute_uv=False) for leg, r in R.items()}
-        B2 = R[A.connections(B)[0]] @ B
+        B2 = R[A.connections(B).pop()] @ B
         for leg in set(B2.indexes).intersection(B.indexes):
             svalQR[leg] = B2.qr(leg)[1].svd(compute_uv=False)
 
@@ -151,3 +155,25 @@ class TestTensors:
 
             assert not C.isclose(C2)
             assert C.isclose(C2._swap1(cids, ii))  # Double swap is the same
+
+    def test_orthogonality(self, create_tensors, helpers):
+        """Tests orthogonality of a one-site tensor both created by QR or SVD
+        """
+        A, B = create_tensors
+
+        # Singular values along loose edges
+        for leg in reversed(A.indexes):
+            Q, R = A.qr(leg)
+            assert Q.is_ortho(Q.connections(R).pop())
+
+    def test_adjoint(self, create_tensors, helpers):
+        A, B = create_tensors
+
+        # Singular values along loose edges
+        for leg in A.indexes:
+            B = A.adj(leg)
+            C = B.adj(set(B.indexes).difference(A.indexes).pop())  # second adj
+            to_subst = set(C.indexes).difference(A.indexes).pop()
+            C._coupling = C.substitutelegs([to_subst], [leg])
+            C._indexes = tuple(x if x != to_subst else leg for x in C._indexes)
+            assert A.isclose(C)

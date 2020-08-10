@@ -252,7 +252,7 @@ class Tensor:
         """
         if not isinstance(B, Tensor):
             raise TypeError(f'{B} is not of {self.__class__}')
-        return [x for x in self.indexes if x in B.indexes]
+        return set(self.indexes).intersection(B.indexes)
 
     def substitutelegs(self, old, new):
         """returns a coupling tuple where oldleg in self is swapped with
@@ -300,7 +300,7 @@ class Tensor:
         if not connections:
             raise ValueError(f'No connections found between {self} and {B}')
 
-        return self.contract(B, (connections,) * 2).simplify()
+        return self.contract(B, (list(connections),) * 2).simplify()
 
     def __imul__(self, a):
         for key in self:
@@ -359,6 +359,7 @@ class Tensor:
                 assert len(Abl.shape) == shapes[0]
                 assert len(Bbl.shape) == shapes[1]
                 C[(*Ak, *Bk)] = np.tensordot(Abl, Bbl, oid)
+                assert len(C[(*Ak, *Bk)].shape) == len(C.indexes)
 
         index = [x for l, T in zip(legs, AB) for x in T.indexes if x not in l]
 
@@ -541,13 +542,126 @@ class Tensor:
             self[k] = np.squeeze(v, axis=ii)
         return True
 
+    def _detectSimpleLoop(self):
+        """Detects simple loops in the coupling of the tensor, i.e. "-<>- → ⊥"
+
+        Returns:
+            a dictionary with properties of the detected simple loop or
+            None if no simple loops are detected
+        """
+        # Internal legs in each coupling
+        incoupl = [set(x[0] for x in y if x[0] in self.internallegs)
+                   for y in self.coupling]
+        # The couplings which have a crossection of two
+        cross = [(i, j) for i, x in enumerate(incoupl)
+                 for j, y in enumerate(incoupl[i + 1:], start=i + 1)
+                 if len(x.intersection(y)) == 2]
+
+        # No Simple loops
+        if len(cross) == 0:
+            return None
+
+        # Pick the first simple loop found
+        loop = {'coupl': cross[0]}
+        # The looping legs
+        loop['lLegs'] = tuple(
+            incoupl[loop['coupl'][0]].intersection(incoupl[loop['coupl'][1]]))
+
+        # The loop indexes
+        loop['lid'] = tuple(
+            tuple([x[0] for x in self.coupling[c]].index(ll)
+                  for c in loop['coupl']) for ll in loop['lLegs'])
+
+        # The free indexes
+        loop['fid'] = tuple(set(range(3)).difference(set(x)).pop()
+                            for x in zip(*loop['lid']))
+
+        # Flow not consistent for lid
+        for x, y in loop['lid']:
+            if self.coupling[loop['coupl'][0]][x][1] == \
+                    self.coupling[loop['coupl'][1]][y][1]:
+                return None
+
+        # Flow not consistent for fid
+        if self.coupling[loop['coupl'][0]][loop['fid'][0]][1] == \
+                self.coupling[loop['coupl'][1]][loop['fid'][1]][1]:
+            return None
+
+        # Re-sort such that the first coupling is ingoing
+        if not self.coupling[loop['coupl'][0]][loop['fid'][0]][1]:
+            loop['coupl'] = (loop['coupl'][1], loop['coupl'][0])
+            loop['lid'] = tuple((x[1], x[0]) for x in loop['lid'])
+            loop['fid'] = (loop['fid'][1], loop['fid'][0])
+
+        assert self.coupling[loop['coupl'][0]][loop['fid'][0]][1]
+
+        return loop
+
+    def _removeSimpleLoop(self):
+        """Removes a simple loop in the coupling, i.e. "-<>- → ⊥". The new
+        introduced leg is a vacuum.
+
+        Returns:
+            True if a loop is removed, False otherwise
+        """
+        if (loop := self._detectSimpleLoop()) is None:
+            return False
+        vackey = sls.vacuumIrrep(self.symmetries)
+        vacleg = Leg(vacuum=True)
+
+        prefdict = sls._prefremoveSimpleLoop(loop, self.coupling)
+
+        def keyMapping(newkey, oldkeys):
+            return tuple([tuple(newkey)] + [c for ii, c in enumerate(oldkeys)
+                                            if ii not in loop['coupl']])
+
+        # Extracts the keys for the in and out legs of the simple loop
+        def extractInAndOutKeys(key):
+            return [key[x][y] for x, y in zip(loop['coupl'], loop['fid'])]
+
+        self._coupling = keyMapping(
+            ((vacleg, True), *extractInAndOutKeys(self.coupling)),
+            self.coupling)
+
+        def mappingf(okey):
+            # The symmetry in the inkey (ik) and outkey (ok) should be the same
+            ik, ok = extractInAndOutKeys(okey)
+            if ik == ok:
+                yield keyMapping((vackey, ik, ok), okey)
+
+        # Remove internallegs belonging to the loop
+        self._internallegs.remove(loop['lLegs'][0])
+        self._internallegs.remove(loop['lLegs'][1])
+
+        def prefactorf(okey, nkey):
+            # assume that everything is consistent!
+            keysw = tuple(x for x in zip(*okey[loop['coupl'][0]],
+                                         *okey[loop['coupl'][1]]))
+            return np.prod([prefdict.get(ss, lambda x: 1.)(k)
+                            for k, ss in zip(keysw, self.symmetries)])
+
+        self._manipulate_coupling(mappingf, prefactorf)
+
+        # Add vacuum from index (last index)
+        self._indexes.append(vacleg)
+        for k in self:
+            self[k] = np.expand_dims(self[k], self[k].ndim)
+
+        return True
+
     def simplify(self):
         """This function tries to simplify a tensor by changing it's coupling.
 
         Types of simplifications:
+            * Removes any simple loops and changes them to couplings to the
+              vacuum.
             * Removes couplings to the vacuum, if the tensor has multiple
               couplings.
         """
+        # First remove all simple loops
+        while self._removeSimpleLoop():
+            pass
+
         # Iteratively remove vacuums until finished
         while self._remove_vacuumcoupling():
             pass
@@ -586,7 +700,7 @@ class Tensor:
         Q._indexes = tuple(i if i != leg else nleg for i in self.indexes)
         vacuum = (0,) * len(self.symmetries)
 
-        assert [x == nleg for x in R.connections(Q)] == [True]
+        assert R.connections(Q) == set([nleg])
 
         keys = set([k[i1][i2] for k in self])
         transp = list(range(len(self.indexes)))
@@ -781,3 +895,85 @@ class Tensor:
                 S[k] = np.linalg.svd(np.squeeze(block, axis=Sid) / prefact(k),
                                      compute_uv=False)
             return S
+
+    def adj(self, leg):
+        """Returns an adjoint of the given tensor which is assumed to be
+        orthogonalized with respect to the given leg.
+
+
+        If leg is None than this specifies it is the orthogonality center.
+        """
+        adj = self.metacopy()
+
+        # Substitute the loose leg by a new leg, if not ortho center
+        nleg = Leg(leg=leg) if leg else None
+        # Assign new internal legs
+        ilegs = [Leg(leg=ll) for ll in self.internallegs]
+        scoup = self.substitutelegs(self.internallegs + [leg]
+                                    if self.internallegs else [leg],
+                                    ilegs + [nleg])
+        # Change the coupling flows appropriately
+        adj._coupling = tuple(tuple((c[0], not c[1]) for c in reversed(x))
+                              for x in scoup)
+        adj._indexes = tuple(x if x != leg else nleg for x in adj._indexes)
+
+        prefdict = sls._prefAdj(self.coupling, leg)
+
+        def prefactorf(key):
+            return np.prod([prefdict.get(ss, lambda x: 1.)(
+                tuple(tuple(x[ii] for x in y) for y in key)
+            ) for ii, ss in enumerate(self.symmetries)])
+
+        adj._data = {}
+        for key in self:
+            adj[tuple(tuple(x for x in reversed(k)) for k in key)] = \
+                self[key] * prefactorf(key)
+        return adj
+
+    def is_unity(self, **kwargs):
+        """Checks if a tensor is the unit tensor.
+        """
+        # Only one coupling allowed
+        if len(self.coupling) != 1:
+            return False
+
+        # Should contain one coupling with the vacuum
+        if [l.vacuum for l, _ in self.coupling[0]].count(True) != 1:
+            return False
+
+        # The vacuum index
+        vid = [l.vacuum for l in self.indexes].index(True)
+        vid2 = [l.vacuum for l, _ in self.coupling[0]].index(True)
+        oid1, oid2 = [ii for ii in range(3) if ii != vid2]
+        id1, id2 = [ii for ii in range(3) if ii != vid]
+        flow = [f for _, f in self.coupling[0]]
+        prefdict = sls._prefremovevac(vid2, flow)
+
+        def scalingfactor(k):
+            return np.prod([prefdict.get(ss, lambda x: 1.)(kk)
+                            for kk, ss in zip(k[oid1], self.symmetries)])
+
+        for k, v in self.items():
+            k = k[0]  # select key of first coupling
+            assert k[oid1] == k[oid2]  # Should not occur when coupling to vac
+
+            # Not square
+            # if v.shape[id1] != v.shape[id2]:
+            #     return False
+
+            if not np.allclose(np.eye(v.shape[id1]), scalingfactor(k)
+                               * np.squeeze(v, axis=vid), **kwargs):
+                return False
+        return True
+
+    def is_ortho(self, leg, **kwargs):
+        """Checks if a tensor is indeed an orthogonal tensor.
+
+        Args:
+            leg: The leg that should be kept loose during the contraction with
+            it's adjoint.
+        Returns:
+            True if indeed an orthogonal tensor, otherwise False.
+        """
+        B = self @ self.adj(leg)  # Make and contract with the adjoint
+        return B.is_unity(**kwargs)
