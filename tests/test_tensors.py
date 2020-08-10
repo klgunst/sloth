@@ -61,6 +61,7 @@ class TestTensors:
         S, T = create_tensors
         for leg in S.indexes:
             Q, R = S.qr(leg)
+            assert Q.is_ortho(Q.connections(R).pop())
             assert S.isclose(Q @ R)
 
     def test_QR_TwoSite(self, create_tensors):
@@ -79,6 +80,9 @@ class TestTensors:
         A = S @ T
         assert len(A.internallegs) == 1
         U, s, V = A.svd(leg=A.internallegs[0])
+        for X in (U, V):
+            nleg = set(X.indexes).difference(A.indexes).pop()
+            assert X.is_ortho(nleg)
         assert A.isclose(U @ s @ V)
 
     def test_SvalConsistent(self, create_tensors, helpers):
@@ -155,16 +159,6 @@ class TestTensors:
 
             assert not C.isclose(C2)
             assert C.isclose(C2._swap1(cids, ii))  # Double swap is the same
-
-    def test_orthogonality(self, create_tensors, helpers):
-        """Tests orthogonality of a one-site tensor both created by QR or SVD
-        """
-        A, B = create_tensors
-
-        # Singular values along loose edges
-        for leg in reversed(A.indexes):
-            Q, R = A.qr(leg)
-            assert Q.is_ortho(Q.connections(R).pop())
 
     def test_adjoint(self, create_tensors, helpers):
         A, B = create_tensors
