@@ -281,7 +281,8 @@ class TNS(nx.MultiDiGraph):
                                    self._loose_legs.items()])
         return tns, U, S, V
 
-    def move_orthogonality_center(self, nodeA, nodeB, pass_interm=False):
+    def move_orthogonality_center(self, nodeA, nodeB, pass_interm=False,
+                                  hook=None):
         """Moves the orthogonality center from nodeA to nodeB.
 
         Does not check if nodeA is orthogonality center!
@@ -300,6 +301,8 @@ class TNS(nx.MultiDiGraph):
             leg = tns.to_undirected(as_view=True).edges[A, B, 0]['leg']
             tns2, (Q, R) = tns.qr(A, leg)
             tns, A = tns2.contracted_nodes(R, B)
+            if hook:
+                hook(tns, A, Q)
 
             if pass_interm:
                 interm.extend([tns2, tns])
@@ -374,7 +377,6 @@ class TNS(nx.MultiDiGraph):
         assert lset.isdisjoint(rset)
         assert lset.union(rset) == self.orbitals
         return lset, rset
-        # return tuple(sorted((lset, rset), key=len))
 
     def disentangle(self, node_iterator=None):
         """General swapping of indexes of two neighbouring tensors.
@@ -389,6 +391,51 @@ class TNS(nx.MultiDiGraph):
 
         for A, B in node_iterator(tns):
             tns, T = tns.contracted_nodes(A, B)
+
+    def two_rdms(self, legs, current_ortho=None):
+        """Calculates the two-orbital rdms of the network.
+
+        Silly implementation
+        """
+        rdms = None
+        legmap = {l: Leg(leg=l) for l in legs}
+
+        def hook(tns, A, Q):
+            nonlocal rdms
+            nonlocal legmap
+
+            common_leg = A.connections(Q).pop()
+            Qa = Q.adj(common_leg)
+            # Mapping for the legs
+            Qaset = set(Qa.indexes).difference(Q.indexes)
+            assert len(Qaset) == 1
+            legmap[common_leg] = Qaset.pop()
+            Qa.swaplegs(legmap)
+
+            if rdms is None:
+                # First start of calc
+                assert legs[0] in Q.indexes
+                # Change physical leg of adjoint
+                rdms = (Q @ Qa).swap(legmap[common_leg], legs[0])
+            else:
+                assert rdms.coupling_id(legs[0])[0] \
+                    == rdms.coupling_id(legmap[legs[0]])[0]
+                rdms @= Q
+                rdms @= Qa
+            assert len(rdms.coupling) == 2
+
+            if legs[1] in A.indexes:
+                rdms @= A
+                Aa = A.adj(leg=None).swaplegs(legmap)
+                rdms @= Aa
+                rdms = rdms.swap(legs[0], legmap[legs[1]])
+
+        A = self._loose_legs[legs[0]][0]
+        current_ortho = self.sink if current_ortho is None else current_ortho
+        tns, X = self.move_orthogonality_center(current_ortho, A)
+        B = tns._loose_legs[legs[1]][0]
+        tns.move_orthogonality_center(X, B, hook=hook)
+        return rdms
 
 
 def read_h5(filename):

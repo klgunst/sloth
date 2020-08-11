@@ -1,4 +1,4 @@
-import networkx
+import networkx as nx
 import numpy as np
 import sloth.symmetries as sls
 
@@ -166,13 +166,13 @@ class Tensor:
         return [[x[0] for x in y] for y in self.coupling]
 
     def get_couplingnetwork(self):
-        network = networkx.MultiDiGraph()
+        network = nx.MultiDiGraph()
         network.add_nodes_from(self.coupling)
         for ll in self.internallegs:
-            incoupl = [c for c in self.coupling if (ll, True) in c]
-            outcoupl = [c for c in self.coupling if (ll, False) in c]
+            incoupl = set(c for c in self.coupling if (ll, True) in c)
+            outcoupl = set(c for c in self.coupling if (ll, False) in c)
             assert len(incoupl) == 1 and len(outcoupl) == 1
-            network.add_edge(outcoupl[0], incoupl[0], leg=ll)
+            network.add_edge(outcoupl.pop(), incoupl.pop(), leg=ll)
         return network
 
     def __repr__(self):
@@ -259,9 +259,19 @@ class Tensor:
         newleg.
         """
         # making dictionary
+        if not hasattr(old, '__iter__'):
+            old, new = [old], [new]
         dic = {o: n for o, n in zip(old, new)}
         return tuple(
             tuple((dic.get(x, x), y) for x, y in z) for z in self.coupling)
+
+    def swaplegs(self, swapdict):
+        self._coupling = tuple(tuple((swapdict.get(x, x), y) for x, y in z)
+                               for z in self.coupling)
+        self._indexes = tuple(swapdict.get(x, x) for x in self._indexes)
+        self._internallegs = tuple(swapdict.get(x, x) for x in
+                                   self._internallegs)
+        return self
 
     def metacopy(self):
         """copy metadata
@@ -439,7 +449,7 @@ class Tensor:
         # index of the internal leg in c1 and c2
         ii = [legs[cid].index(ileg) for cid in cids]
 
-        assert ii[0] != c1 and ii[1] != c2
+        assert ii[0] != i1 and ii[1] != i2
         # Check that the flow is consistent along the internal bond
         assert self.coupling[c1][ii[0]][1] is not self.coupling[c2][ii[1]][1]
 
@@ -649,6 +659,47 @@ class Tensor:
 
         return True
 
+    def _detectTripleLoop(self):
+        # Couplings that are connected to each other
+        legs = self.get_legs()
+        nc = [set(i for i, x in enumerate(legs) if x != c
+                  and set(x).intersection(c)) for c in legs]
+        for ii, ni in enumerate(nc):
+            for jj in ni:
+                if s := ni.intersection(nc[jj]):
+                    # There is a loop
+                    kk = s.pop()
+                    assert ii in nc[kk] and jj in nc[kk] and ii in nc[jj]
+
+                    il, jl, kl = [[k for k, _ in self.coupling[x]]
+                                  for x in (ii, jj, kk)]
+                    # flow from ii to jj
+                    iitojj = [y for x, y in self.coupling[ii] if x in jl][0]
+                    # flow from kk to free
+                    kktofree = [y for x, y in self.coupling[kk] if x not in jl
+                                and x not in il][0]
+                    if iitojj is kktofree:
+                        il, jl = jl, il
+                        ii, jj = jj, ii
+
+                    # leg between jj and kk, index of jj
+                    cid2 = set([x for x, y in enumerate(jl) if y in kl]).pop()
+                    # free leg of ii, index of ii
+                    cid1 = set([x for x, y in enumerate(il) if y not in kl
+                                and y not in jl]).pop()
+                    return (ii, jj), (cid1, cid2)
+
+        return None
+
+    def _removeTripleLoop(self):
+        """Removes a triple loop.
+        """
+        if (loop := self._detectTripleLoop()) is None:
+            return False
+
+        self._swap1(*loop)
+        return True
+
     def simplify(self):
         """This function tries to simplify a tensor by changing it's coupling.
 
@@ -658,6 +709,10 @@ class Tensor:
             * Removes couplings to the vacuum, if the tensor has multiple
               couplings.
         """
+        # First remove all simple loops
+        while self._removeTripleLoop():
+            pass
+
         # First remove all simple loops
         while self._removeSimpleLoop():
             pass
@@ -977,3 +1032,19 @@ class Tensor:
         """
         B = self @ self.adj(leg)  # Make and contract with the adjoint
         return B.is_unity(**kwargs)
+
+    def swap(self, fl, sl):
+        cids = [self.coupling_id(ll) for ll in (fl, sl)]
+        if cids[0][0] == cids[1][0]:
+            # Do _swap0
+            permute = list(range(3))
+            permute[cids[0][1]], permute[cids[1][1]] = \
+                permute[cids[1][1]], permute[cids[0][1]]
+            return self._swap0(cids[0][0], permute)
+        elif conn := set(c[0] for c in self.coupling[cids[0][0]]).intersection(
+                c[0] for c in self.coupling[cids[1][0]]):
+            if len(conn) != 1:
+                raise NotImplementedError
+            return self._swap1(*[x for x in zip(*cids)])
+        else:
+            raise NotImplementedError

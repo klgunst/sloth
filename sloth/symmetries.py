@@ -103,18 +103,11 @@ def _prefswap1(ll, il):
         pref_funcs.append(lambda x, y: su2acyclic(x[:3]) * su2acyclic(y[:3]))
 
     # Acyclic permutation of second coupling
-    if (sb - 1) % 3 != ib:
+    if (sb - 1) % 3 != (ib % 3):
         pref_funcs.append(lambda x, y: su2acyclic(x[3:]) * su2acyclic(y[3:]))
 
-    ra = list(range(3))
-    ra.remove(sa)
-    ra.remove(ia)
-    ra = ra[0]
-
-    rb = list(range(3, 6))
-    rb.remove(sb)
-    rb.remove(ib)
-    rb = rb[0]
+    ra = set(range(3)).difference((sa, ia)).pop()
+    rb = set(range(3, 6)).difference((sb, ib)).pop()
 
     def su2pref(ok, nk, pref_funcs):
         w6j = wigner_6j(nk[sb] / 2., nk[rb] / 2., nk[ib] / 2.,
