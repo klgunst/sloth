@@ -160,6 +160,10 @@ class TNS(nx.MultiDiGraph):
                 node_size=[len(s.coupling) * 300 for s in self],
                 with_labels=True)
 
+    def getPhysicalLegs(self):
+        return set(k for k, (_, name) in self._loose_legs.items()
+                   if name and name[0] == 'p')
+
     @property
     def orbitals(self):
         """The orbitals in the current tensor network.
@@ -392,49 +396,98 @@ class TNS(nx.MultiDiGraph):
         for A, B in node_iterator(tns):
             tns, T = tns.contracted_nodes(A, B)
 
-    def two_rdms(self, legs, current_ortho=None):
-        """Calculates the two-orbital rdms of the network.
+    def depthFirst(self, current_ortho=None):
+        assert nx.algorithms.dag.is_directed_acyclic_graph(self)
+        current_ortho = self.sink if not current_ortho else current_ortho
 
-        Silly implementation
-        """
-        rdms = None
-        legmap = {l: Leg(leg=l) for l in legs}
+        def traverse_depthFirst():
+            boundaries = set(b for b in self.boundaries())
+            if current_ortho in boundaries:
+                boundaries.remove(current_ortho)
+            current = current_ortho
+            G = self.to_undirected(as_view=True)
+            while boundaries:
+                shortest = min((nx.shortest_path(G, current, b) for b in
+                                boundaries), key=len)
+                current = shortest[-1]
+                boundaries.remove(current)
+                for A, B in zip(shortest, shortest[1:]):
+                    yield A.connections(B).pop()
 
-        def hook(tns, A, Q):
-            nonlocal rdms
-            nonlocal legmap
+        legs = [l for l in traverse_depthFirst()]
+        leg_map = {}
 
-            common_leg = A.connections(Q).pop()
-            Qa = Q.adj(common_leg)
-            # Mapping for the legs
+        A = current_ortho
+        tns = self
+        for oleg in legs:
+            leg = leg_map.get(oleg, oleg)
+            nA, nB = tns.nodes_with_leg(leg)
+            # A is the current ortho center
+            assert A == nA or A == nB
+            B = nB if nA == A else nA  # B is the other tensor than A
+            tns, (Q, R) = tns.qr(A, leg)
+            tns, A = tns.contracted_nodes(R, B)
+            leg_map[oleg] = A.connections(Q).pop()
+            yield Q, A
+
+    def two_rdms(self, current_ortho=None):
+        rdms = {}
+        pLegs = self.getPhysicalLegs()
+        intermediate = {pl: {} for pl in pLegs}
+
+        # Adjoint mapping for all physical legs
+        padj_map = {pl: Leg(leg=pl) for pl in pLegs}
+        # Adjoint mapping for virtual legs
+        vadj_map = {}
+
+        for Q, A in self.depthFirst(current_ortho):
+            nleg = A.connections(Q).pop()
+            Qa = Q.adj(nleg)
             Qaset = set(Qa.indexes).difference(Q.indexes)
             assert len(Qaset) == 1
-            legmap[common_leg] = Qaset.pop()
-            Qa.swaplegs(legmap)
+            vadj_map[nleg] = Qaset.pop()  # update adjoint mapping
 
-            if rdms is None:
-                # First start of calc
-                assert legs[0] in Q.indexes
-                # Change physical leg of adjoint
-                rdms = (Q @ Qa).swap(legmap[common_leg], legs[0])
+            # Initiating of new intermediate result (only if Q is physical)
+            if pl := set(Q.indexes).intersection(pLegs):
+                Qa2 = Qa.shallowcopy().swaplegs(padj_map)
+                pl = pl.pop()
+                intermediate[pl][nleg] = (Q @ Qa2).swap(vadj_map[nleg], pl)
+
+            # Updating intermediate results with Q
+            for pl, dic in intermediate.items():
+                if pl in Q.indexes:
+                    continue
+
+                if ic := set(Q.indexes).intersection(dic):
+                    # An intermediate result has to be on exactly one side of Q
+                    assert len(ic) == 1
+                    ll = ic.pop()
+                    Qa2 = Qa.shallowcopy().swaplegs({ll: vadj_map[ll]})
+                    dic[nleg] = (dic[ll] @ Q) @ Qa2
+                    assert len(dic[nleg].coupling) == 2
+
+            # Forming finished rdms with A
+            Aa = A.adj(leg=None).swaplegs(padj_map)
+            # First case: A is a physical tensor
+            if pl := set(A.indexes).intersection(pLegs):
+                pl = pl.pop()
+                for pl2, dic in intermediate.items():
+                    if pl2 == pl or (pl, pl2) in rdms or (pl2, pl) in rdms:
+                        continue
+
+                    if ic := set(A.indexes).intersection(dic):
+                        # An intermediate has to be on exactly one side of A
+                        assert len(ic) == 1
+                        ll = ic.pop()
+                        Aa2 = Aa.shallowcopy().swaplegs({ll: vadj_map[ll]})
+                        rdms[(pl, pl2)] = (dic[ll] @ A) @ Aa2
+                        assert len(rdms[(pl, pl2)].coupling) == 2
             else:
-                assert rdms.coupling_id(legs[0])[0] \
-                    == rdms.coupling_id(legmap[legs[0]])[0]
-                rdms @= Q
-                rdms @= Qa
-            assert len(rdms.coupling) == 2
-
-            if legs[1] in A.indexes:
-                rdms @= A
-                Aa = A.adj(leg=None).swaplegs(legmap)
-                rdms @= Aa
-                rdms = rdms.swap(legs[0], legmap[legs[1]])
-
-        A = self._loose_legs[legs[0]][0]
-        current_ortho = self.sink if current_ortho is None else current_ortho
-        tns, X = self.move_orthogonality_center(current_ortho, A)
-        B = tns._loose_legs[legs[1]][0]
-        tns.move_orthogonality_center(X, B, hook=hook)
+                # Second case: A is a branching tensor
+                # No recombination needed
+                pass
+        for k in rdms:
+            rdms[k].swap(k[0], padj_map[k[1]])
         return rdms
 
 

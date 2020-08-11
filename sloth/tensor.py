@@ -277,7 +277,7 @@ class Tensor:
         """copy metadata
         """
         X = Tensor(self.symmetries, coupling=self.coupling)
-        X._indexes = [x for x in self.indexes]
+        X._indexes = list(self.indexes)
         return X
 
     def shallowcopy(self):
