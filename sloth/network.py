@@ -1,7 +1,6 @@
 from sloth.tensor import Leg, Tensor, _SYMMETRIES
 import networkx as nx
 import numpy as np
-import h5py
 
 
 class TNS(nx.MultiDiGraph):
@@ -24,6 +23,18 @@ class TNS(nx.MultiDiGraph):
 
         if isinstance(data, TNS):
             self._loose_legs = data._loose_legs.copy()
+
+    def isMPS(self):
+        """Checks if it is an MPS (otherwise a TTNS)
+        """
+        return len([b for b in self.boundaries()]) == 2
+
+    def topologicalPsiteSort(self):
+        """Only unique for MPS otherwise, branches can be swapped
+        """
+        pLegs = self.getPhysicalLegs()
+        X = [pLegs.intersection(N.indexes) for N in nx.topological_sort(self)]
+        return [x.pop() for x in X if x]
 
     @property
     def unique_legs(self):
@@ -498,12 +509,49 @@ class TNS(nx.MultiDiGraph):
         assert len(rdms) == totals
         return rdms
 
+    def mutualInfo(self, alphas=[1], current_ortho=None):
+        """Order is p1, p2, ...
+        """
+        from sloth.utils import renyi_entropy
+        pLegs = self.getPhysicalLegs()
+        rdms = self.two_rdms(current_ortho)
+        svals = self.calculate_singular_values(current_ortho)
+        pLsvals = {
+            **{ll: r.svd(leg=r.internallegs[0])[1] for ll, r in rdms.items()},
+            **{l: svals[l] for l in pLegs}
+        }
+        if not hasattr(alphas, '__iter__'):
+            alphas = [alphas]
+        pLentropies = {ll: np.array([renyi_entropy(v, α=a) for a in alphas])
+                       for ll, v in pLsvals.items()}
+
+        legmap = [None] * len(pLegs)
+        for ll, (_, name) in self._loose_legs.items():
+            if name and name[0] == 'p':
+                legmap[int(name[1:])] = ll
+        assert None not in legmap
+
+        mutualInformation = np.zeros((len(legmap), len(legmap), len(alphas)))
+        for ii, l1 in enumerate(legmap):
+            Si = pLentropies[l1]
+            for jj, l2 in enumerate(legmap[ii + 1:], start=ii + 1):
+                key = (l1, l2) if (l1, l2) in pLentropies else (l2, l1)
+                Sj = pLentropies[l2]
+                Sij = pLentropies[key]
+                I = 0.5 * (Si + Sj - Sij)
+                mutualInformation[ii, jj, :] = I
+                mutualInformation[jj, ii, :] = I
+
+        mutualInformation = np.squeeze(mutualInformation)
+        return mutualInformation, legmap
+
 
 def read_h5(filename):
     """This reads a hdf5 file.
 
     Returns the network.
     """
+    import h5py
     h5file = h5py.File(filename, 'r')
     sym = [_SYMMETRIES[i] for i in h5file['bookkeeper'].attrs['sgs']]
 

@@ -23,7 +23,8 @@ def pytest_addoption(parser):
 
 def pytest_generate_tests(metafunc):
     if "symmetr" in metafunc.fixturenames:
-        if kinds := metafunc.config.getoption("symmetries"):
+        kinds = metafunc.config.getoption("symmetries")
+        if kinds:
             kinds = [[k] for k in kinds]
         else:
             kinds = [['fermionic', 'U(1)'], ['SU(2)'], ['fermionic', 'SU(2)']]
