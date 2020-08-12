@@ -1,4 +1,4 @@
-from sympy.physics.wigner import wigner_6j
+from sloth.utils import wigner6j
 import numpy as np
 from functools import reduce
 
@@ -110,9 +110,8 @@ def _prefswap1(ll, il):
     rb = set(range(3, 6)).difference((sb, ib)).pop()
 
     def su2pref(ok, nk, pref_funcs):
-        w6j = wigner_6j(nk[sb] / 2., nk[rb] / 2., nk[ib] / 2.,
-                        nk[sa] / 2., nk[ra] / 2., ok[ia] / 2.)
-        pr = (nk[ia] + 1) * float(w6j) * \
+        w6j = wigner6j(nk[sb], nk[rb], nk[ib], nk[sa], nk[ra], ok[ia])
+        pr = (nk[ia] + 1) * w6j * \
             (1. if (nk[ia] + ok[ia] - ok[sa] - ok[sb]) % 4 == 0 else -1.)
         return reduce(lambda x, y: x * y, [p(ok, nk) for p in pref_funcs], pr)
 
@@ -283,9 +282,6 @@ def allowed_couplings(coupling, flow, free_id, symmetries):
 
     for ncoupling in product(*[constraint[s](c, other_f, this_f)
                                for *c, s in zip(*other_c, symmetries)]):
-
-        assert is_allowed_coupling([c if ii != free_id else ncoupling for ii, c
-                                    in enumerate(coupling)], flow, symmetries)
         yield ncoupling
 
 
@@ -302,14 +298,13 @@ def is_allowed_coupling(coupling, flow, symmetries):
         return sum(irreps) % 2 == 0
 
     def U1_constraint(irreps, flow):
-        sign = {True: 1, False: -1}
-        return sum(sign[f] * x for x, f in zip(irreps, flow)) == 0
+        return sum((1 if f else -1) * x for x, f in zip(irreps, flow)) == 0
 
     def pg_constraint(irreps, flow):
         return irreps[0] ^ irreps[1] == irreps[2]
 
     def SU2_constraint(irreps, flow):
-        return irreps[0] + irreps[1] >= irreps[2] and \
+        return (irreps[0] + irreps[1]) >= irreps[2] and \
             abs(irreps[0] - irreps[1]) <= irreps[2] and sum(irreps) % 2 == 0
 
     constraint = {

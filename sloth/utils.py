@@ -1,14 +1,31 @@
 import numpy as np
-from sloth.tensor import _SYMMETRIES
+import os
+import ctypes
+
+libname = 'libWigner.so'
+try:
+    libWigner = ctypes.cdll.LoadLibrary(libname)
+except OSError:
+    parentdir = os.path.dirname(os.path.realpath(__file__))
+    libWigner = ctypes.cdll.LoadLibrary(os.path.join(parentdir, libname))
+
+wigner3j = libWigner.wigner3j
+wigner3j.argtypes = [ctypes.c_int] * 6
+wigner3j.restype = ctypes.c_double
+
+wigner6j = libWigner.wigner6j
+wigner6j.argtypes = [ctypes.c_int] * 6
+wigner6j.restype = ctypes.c_double
+
+wigner9j = libWigner.wigner9j
+wigner9j.argtypes = [ctypes.c_int] * 9
+wigner9j.restype = ctypes.c_double
 
 
 def flatten_svals(svals):
     """Flattens and sorts the singular values in a 1D array. It takes the
     multiplets into account.
     """
-    if not set(svals['symmetries']).issubset(set(_SYMMETRIES)):
-        raise ValueError('Invalid symmetries found')
-
     # Gets all SU(2) symmetries
     su2ids = [ii for ii, s in enumerate(svals['symmetries']) if s == 'SU(2)']
 

@@ -440,7 +440,9 @@ class TNS(nx.MultiDiGraph):
         # Adjoint mapping for virtual legs
         vadj_map = {}
 
+        totals = len(self.orbitals) * (len(self.orbitals) - 1) // 2
         for Q, A in self.depthFirst(current_ortho):
+            # print(f'{len(rdms)} / {totals}')
             nleg = A.connections(Q).pop()
             Qa = Q.adj(nleg)
             Qaset = set(Qa.indexes).difference(Q.indexes)
@@ -448,7 +450,8 @@ class TNS(nx.MultiDiGraph):
             vadj_map[nleg] = Qaset.pop()  # update adjoint mapping
 
             # Initiating of new intermediate result (only if Q is physical)
-            if pl := set(Q.indexes).intersection(pLegs):
+            pl = set(Q.indexes).intersection(pLegs)
+            if pl:
                 Qa2 = Qa.shallowcopy().swaplegs(padj_map)
                 pl = pl.pop()
                 intermediate[pl][nleg] = (Q @ Qa2).swap(vadj_map[nleg], pl)
@@ -458,7 +461,8 @@ class TNS(nx.MultiDiGraph):
                 if pl in Q.indexes:
                     continue
 
-                if ic := set(Q.indexes).intersection(dic):
+                ic = set(Q.indexes).intersection(dic)
+                if ic:
                     # An intermediate result has to be on exactly one side of Q
                     assert len(ic) == 1
                     ll = ic.pop()
@@ -469,13 +473,15 @@ class TNS(nx.MultiDiGraph):
             # Forming finished rdms with A
             Aa = A.adj(leg=None).swaplegs(padj_map)
             # First case: A is a physical tensor
-            if pl := set(A.indexes).intersection(pLegs):
+            pl = set(A.indexes).intersection(pLegs)
+            if pl:
                 pl = pl.pop()
                 for pl2, dic in intermediate.items():
                     if pl2 == pl or (pl, pl2) in rdms or (pl2, pl) in rdms:
                         continue
 
-                    if ic := set(A.indexes).intersection(dic):
+                    ic = set(A.indexes).intersection(dic)
+                    if ic:
                         # An intermediate has to be on exactly one side of A
                         assert len(ic) == 1
                         ll = ic.pop()
@@ -488,6 +494,8 @@ class TNS(nx.MultiDiGraph):
                 pass
         for k in rdms:
             rdms[k].swap(k[0], padj_map[k[1]])
+
+        assert len(rdms) == totals
         return rdms
 
 

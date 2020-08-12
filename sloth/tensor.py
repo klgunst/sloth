@@ -362,14 +362,25 @@ class Tensor:
         shapes = [len(T.indexes) for T in AB]
         C.coupling = tuple(el for T, ll in zip(AB, legs)
                            for el in T.substitutelegs(ll, ilegs))
-        for Ak, Abl in self.items():
-            Akcid = [Ak[x][y] for x, y in cid[0]]
 
-            for Bk, Bbl in B.iterate(Akcid, cid[1]):
+        Akeys, Bkeys = {}, {}
+        for T, ci, dic in zip((self, B), cid, (Akeys, Bkeys)):
+            for key in T:
+                kk = tuple(key[x][y] for x, y in ci)
+                try:
+                    dic[kk].append(key)
+                except KeyError:
+                    dic[kk] = [key]
+
+        for kk in set(Akeys).intersection(Bkeys):
+            for Ak in Akeys[kk]:
+                Abl = self[Ak]
                 assert len(Abl.shape) == shapes[0]
-                assert len(Bbl.shape) == shapes[1]
-                C[(*Ak, *Bk)] = np.tensordot(Abl, Bbl, oid)
-                assert len(C[(*Ak, *Bk)].shape) == len(C.indexes)
+                for Bk in Bkeys[kk]:
+                    Bbl = B[Bk]
+                    assert len(Bbl.shape) == shapes[1]
+                    C[(*Ak, *Bk)] = np.tensordot(Abl, Bbl, oid)
+                    assert len(C[(*Ak, *Bk)].shape) == len(C.indexes)
 
         index = [x for l, T in zip(legs, AB) for x in T.indexes if x not in l]
 
@@ -614,7 +625,8 @@ class Tensor:
         Returns:
             True if a loop is removed, False otherwise
         """
-        if (loop := self._detectSimpleLoop()) is None:
+        loop = self._detectSimpleLoop()
+        if loop is None:
             return False
         vackey = sls.vacuumIrrep(self.symmetries)
         vacleg = Leg(vacuum=True)
@@ -666,7 +678,8 @@ class Tensor:
                   and set(x).intersection(c)) for c in legs]
         for ii, ni in enumerate(nc):
             for jj in ni:
-                if s := ni.intersection(nc[jj]):
+                s = ni.intersection(nc[jj])
+                if s:
                     # There is a loop
                     kk = s.pop()
                     assert ii in nc[kk] and jj in nc[kk] and ii in nc[jj]
@@ -694,7 +707,8 @@ class Tensor:
     def _removeTripleLoop(self):
         """Removes a triple loop.
         """
-        if (loop := self._detectTripleLoop()) is None:
+        loop = self._detectTripleLoop()
+        if not loop:
             return False
 
         self._swap1(*loop)
@@ -1035,14 +1049,15 @@ class Tensor:
 
     def swap(self, fl, sl):
         cids = [self.coupling_id(ll) for ll in (fl, sl)]
+        conn = set(c[0] for c in self.coupling[cids[0][0]]).intersection(
+            c[0] for c in self.coupling[cids[1][0]])
         if cids[0][0] == cids[1][0]:
             # Do _swap0
             permute = list(range(3))
             permute[cids[0][1]], permute[cids[1][1]] = \
                 permute[cids[1][1]], permute[cids[0][1]]
             return self._swap0(cids[0][0], permute)
-        elif conn := set(c[0] for c in self.coupling[cids[0][0]]).intersection(
-                c[0] for c in self.coupling[cids[1][0]]):
+        elif conn:
             if len(conn) != 1:
                 raise NotImplementedError
             return self._swap1(*[x for x in zip(*cids)])
