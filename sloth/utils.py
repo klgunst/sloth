@@ -52,3 +52,53 @@ def renyi_entropy(svals, α=1):
         spomega = np.sum(np.power(omega, α))
         is_zero = np.isclose(spomega, np.zeros(spomega.shape), atol=1e-32)
         return np.log(spomega, where=np.logical_not(is_zero)) / (1 - α)
+
+
+def simAnnealing(Iij, Dij, iterations=1000, β=1, η=2, initstate=None,
+                 swappairs=None):
+    from random import sample, random
+    assert Iij.shape == Dij.shape and Iij.shape[0] == Iij.shape[1]
+
+    nsites = Iij.shape[0]
+    if initstate is None:
+        initstate = sample(range(nsites), nsites)
+    elif len(initstate) != nsites:
+        raise ValueError('initstate is not correct length')
+
+    Dij_η = np.power(Dij, η)
+
+    def costfunction(state):
+        """The default cost function.
+
+        Cost is Σ Iij * |i - j|^η
+        """
+        return np.sum(Iij[state][:, state] * Dij_η)
+
+    def doswap(nsites, swappairs=None):
+        from random import sample
+        if swappairs is None:
+            return sample(range(nsites), 2)
+        else:
+            return sample(swappairs, 1)[0]
+
+    currstate, beststate = list(initstate), list(initstate)
+    ocost, bestcost = (costfunction(currstate),) * 2
+
+    for it in range(iterations):
+        while True:
+            i, j = doswap(nsites, swappairs)
+            # swap them
+            currstate[i], currstate[j] = currstate[j], currstate[i]
+            ncost = costfunction(currstate)
+
+            if ncost < ocost or random() < np.exp(-β * (ncost - ocost)):
+                # swap is accepted
+                ocost = ncost
+                # new best state
+                if bestcost > ocost:
+                    beststate = list(currstate)
+                    bestcost = ocost
+                break
+            # swap is not accepted, redo swap
+            currstate[i], currstate[j] = currstate[j], currstate[i]
+    return beststate, bestcost

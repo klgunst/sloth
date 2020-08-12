@@ -36,6 +36,15 @@ class TNS(nx.MultiDiGraph):
         X = [pLegs.intersection(N.indexes) for N in nx.topological_sort(self)]
         return [x.pop() for x in X if x]
 
+    def lexicographicalPsiteSort(self):
+        """Returns the legs in p1, p2, p3, ... order
+        """
+        legmap = {}
+        for ll, (_, name) in self._loose_legs.items():
+            if name and name[0] == 'p':
+                legmap[int(name[1:])] = ll
+        return tuple(legmap[i] for i in range(len(legmap)))
+
     @property
     def unique_legs(self):
         return set(x[-1] for x in self.edges(data='leg'))
@@ -513,7 +522,7 @@ class TNS(nx.MultiDiGraph):
         """Order is p1, p2, ...
         """
         from sloth.utils import renyi_entropy
-        pLegs = self.getPhysicalLegs()
+        pLegs = self.lexicographicalPsiteSort()
         rdms = self.two_rdms(current_ortho)
         svals = self.calculate_singular_values(current_ortho)
         pLsvals = {
@@ -525,16 +534,10 @@ class TNS(nx.MultiDiGraph):
         pLentropies = {ll: np.array([renyi_entropy(v, α=a) for a in alphas])
                        for ll, v in pLsvals.items()}
 
-        legmap = [None] * len(pLegs)
-        for ll, (_, name) in self._loose_legs.items():
-            if name and name[0] == 'p':
-                legmap[int(name[1:])] = ll
-        assert None not in legmap
-
-        mutualInformation = np.zeros((len(legmap), len(legmap), len(alphas)))
-        for ii, l1 in enumerate(legmap):
+        mutualInformation = np.zeros((len(pLegs), len(pLegs), len(alphas)))
+        for ii, l1 in enumerate(pLegs):
             Si = pLentropies[l1]
-            for jj, l2 in enumerate(legmap[ii + 1:], start=ii + 1):
+            for jj, l2 in enumerate(pLegs[ii + 1:], start=ii + 1):
                 key = (l1, l2) if (l1, l2) in pLentropies else (l2, l1)
                 Sj = pLentropies[l2]
                 Sij = pLentropies[key]
@@ -543,7 +546,29 @@ class TNS(nx.MultiDiGraph):
                 mutualInformation[jj, ii, :] = I
 
         mutualInformation = np.squeeze(mutualInformation)
-        return mutualInformation, legmap
+        return mutualInformation
+
+    def getPhysicalDistances(self):
+        """Returns a matrix with the path lengths between all the physical
+        legs.
+
+        Returns:
+            Distance between each two physical legs
+        """
+        pLegs = self.lexicographicalPsiteSort()
+        pSites = {N: set(pLegs).intersection(N.indexes).pop() for N in self
+                  if set(pLegs).intersection(N.indexes)}
+        D = np.zeros((len(pLegs), len(pLegs)), dtype=int)
+
+        for N, dists in nx.all_pairs_shortest_path_length(
+                self.to_undirected(as_view=True)):
+            if N in pSites:
+                ii = pLegs.index(pSites[N])
+                for M, v in dists.items():
+                    if M in pSites:
+                        jj = pLegs.index(pSites[M])
+                        D[ii, jj] = v
+        return D
 
 
 def read_h5(filename):
