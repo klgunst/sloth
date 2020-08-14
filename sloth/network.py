@@ -242,12 +242,10 @@ class TNS(nx.MultiDiGraph):
     def boundaries(self):
         """iterator over all the boundary tensors (only if it is a dag)
         """
-        undirected = self.to_undirected(as_view=True)
-        if not nx.algorithms.tree.recognition.is_tree(undirected):
-            raise ValueError('Graph needs to be a a tree')
-
-        for n in undirected:
-            if undirected.degree(n) == 1:
+        if not nx.algorithms.dag.is_directed_acyclic_graph(self):
+            raise ValueError('Graph should be a directed acyclic graph')
+        for n, d in self.degree():
+            if d == 1:
                 yield n
 
     def contract(self, pass_intermediates=False):
@@ -416,14 +414,11 @@ class TNS(nx.MultiDiGraph):
         for A, B in node_iterator(tns):
             tns, T = tns.contracted_nodes(A, B)
 
-    def depthFirst(self, current_ortho=None):
-        assert nx.algorithms.dag.is_directed_acyclic_graph(self)
+    def traverse_depthFirst(self, current_ortho=None, loop=False):
         current_ortho = self.sink if not current_ortho else current_ortho
-
-        def traverse_depthFirst():
-            boundaries = set(b for b in self.boundaries())
-            if current_ortho in boundaries:
-                boundaries.remove(current_ortho)
+        boundaries = set(b for b in self.boundaries())
+        if current_ortho in boundaries:
+            boundaries.remove(current_ortho)
             current = current_ortho
             G = self.to_undirected(as_view=True)
             while boundaries:
@@ -432,9 +427,18 @@ class TNS(nx.MultiDiGraph):
                 current = shortest[-1]
                 boundaries.remove(current)
                 for A, B in zip(shortest, shortest[1:]):
-                    yield A.connections(B).pop()
+                    yield A, B
+            if loop:
+                shortest = nx.shortest_path(G, current, current_ortho)
+                for A, B in zip(shortest, shortest[1:]):
+                    yield A, B
 
-        legs = [l for l in traverse_depthFirst()]
+    def depthFirst(self, current_ortho=None, loop=False):
+        assert nx.algorithms.dag.is_directed_acyclic_graph(self)
+        current_ortho = self.sink if not current_ortho else current_ortho
+
+        legs = [A.connections(B).pop() for A, B in
+                self.traverse_depthFirst(current_ortho, loop)]
         leg_map = {}
 
         A = current_ortho
@@ -570,6 +574,212 @@ class TNS(nx.MultiDiGraph):
                         D[ii, jj] = v
         return D
 
+    def _write_h5_network(self, f, bleg, sites):
+        """Helper function to write the network in the opened hdf5 file
+
+        Args:
+            f: the id of the root of the h5 file to write in
+        Returns:
+            sites: list with all the nodes in the used order
+            bleg: list with all the virtual edges in the used order
+        """
+        pLegs = self.getPhysicalLegs()
+
+        h5n = f.create_group('network')
+        h5n.attrs['sites'] = [np.int32(len(sites))]
+        h5n.attrs['psites'] = [np.int32(len(self.orbitals))]
+        h5n['sweep'] = [np.int32(sites.index(A)) for A, _ in
+                        self.traverse_depthFirst(loop=True)]
+        h5n.attrs['sweeplength'] = [np.int32(len(h5n['sweep']))]
+        h5n['sitetoorb'] = [
+            np.int32(self._loose_legs[
+                pLegs.intersection(A.indexes).pop()][1][1:])
+            if pLegs.intersection(A.indexes) else -1 for A in sites]
+
+        bonds = []
+        for A in sites:
+            Ai = sites.index(A)
+            if len(list(self.predecessors(A))) == 0:
+                bonds.append([-1, Ai])
+                assert A.coupling[0][0][0].vacuum
+            successors = set(self.successors(A))
+            if successors:
+                assert len(successors) == 1
+                bonds.append([Ai, sites.index(successors.pop())])
+                assert not A.coupling[0][2][0].vacuum
+            else:
+                assert A == self.sink
+                bonds.append([Ai, -1])
+                assert not A.coupling[0][2][0].vacuum
+        h5n['bonds'] = np.array(bonds, dtype=np.int32).ravel()
+        h5n.attrs['nr_bonds'] = [np.int32(len(bonds))]
+
+    def _write_h5_symsec(self, h5b, A, bleg, ll):
+        pLegs = self.getPhysicalLegs()
+        bid = int(self._loose_legs[ll][1][1:]) if ll in pLegs \
+            else bleg.index(ll)
+        h5s = h5b.create_group(f'{"p" if ll in pLegs else "v"}_symsec_{bid}')
+        bid += 2 * h5b.attrs['nr_bonds'].item() if ll in pLegs else 0
+        h5s.attrs['bond'] = [np.int32(bid)]
+
+        ci1, ci2 = A.coupling_id(ll)
+        cii = A.indexes.index(ll)
+        qnd = set((k[ci1][ci2], v.shape[cii]) for k, v in A.items())
+
+        if ll not in pLegs:
+            # Sort with respect to the keys
+            qnd = sorted(qnd, key=lambda tup: tup[0][::-1])
+        else:
+            # Weird conventions in T3NS
+            U1ids = sorted(A.getSymmIds('U(1)'), reverse=True)
+            qnd = sorted(qnd, key=lambda tup: [tup[0][i] for i in U1ids])
+
+        # Every key has only one entry with an unique dimension
+        assert len(qnd) == len(set(q for q, _ in qnd))
+
+        qn, di = [x for x in zip(*qnd)]
+        h5s['irreps'] = np.array(qn, dtype=np.int32).flatten()
+        h5s['dims'] = np.array(di, dtype=np.int32)
+        h5s['fcidims'] = np.ones(len(qn), dtype=np.float64)
+        h5s.attrs['totaldims'] = [np.int32(sum(h5s['dims']))]
+        h5s.attrs['nrSecs'] = [np.int32(len(qn))]
+        return qn, di
+
+    def _write_h5_bookkeeper(self, f, sites, bleg):
+        h5b = f.create_group('bookkeeper')
+        h5b.attrs['nrSyms'] = [np.int32(len(self.sink.symmetries))]
+        h5b.attrs['Max_symmetries'] = h5b.attrs['nrSyms']
+        h5b.attrs['nr_bonds'] = f['network'].attrs['nr_bonds']
+        h5b.attrs['psites'] = f['network'].attrs['psites']
+        h5b.attrs['sgs'] = [np.int32(_SYMMETRIES.index(s))
+                            for s in self.sink.symmetries]
+
+        # Find target bond
+        target_leg = set(ll for ll, f in self.sink.coupling[0] if not f).pop()
+        id1, id2 = self.sink.coupling_id(target_leg)
+        assert id1 == 0 and id2 == 2
+        # filthy fix: but that is because it is ugly in T3NS-code
+        target = [set(x).pop() if len(set(x)) == 1 else -max(set(x))
+                  for x in zip(*[k[id1][id2] for k in self.sink])]
+        assert len(target) == len(self.sink.symmetries)
+        h5b.attrs['target_state'] = np.array(target, dtype=np.int32)
+
+        # data for the symsecs
+        qnsecs = {}
+        for A in self:
+            for ll in set(A.indexes).difference(qnsecs):
+                # Writing the symsecs
+                qnsecs[ll] = self._write_h5_symsec(h5b, A, bleg, ll)
+        return qnsecs
+
+    def _write_h5_T3NS(self, f, qnsecs, sites):
+        h5t = f.create_group('T3NS')
+        h5t.attrs['nrSites'] = [np.int32(len(sites))]
+
+        def prefactor(key):
+            return np.prod([np.sqrt(key[0][2][i] + 1) for i in SU2_ids])
+
+        for ii, A in enumerate(sites):
+            SU2_ids = [] if A == self.sink else A.getSymmIds('SU(2)')
+
+            h5A = h5t.create_group(f'tensor_{ii}')
+            h5A.attrs['nrblocks'] = [np.int32(len(A))]
+            h5A.attrs['nrsites'] = [np.int32(len(A.coupling))]
+            h5A.attrs['sites'] = [np.int32(ii)]
+            h5b = h5A.create_group('block_0')
+            h5b.attrs['nrBlocks'] = h5A.attrs['nrblocks']
+            blocks = []
+            for k, v in A.items():
+                i1, i2, i3 = [qnsecs[ll][0].index(kk) for (ll, _), kk in
+                              zip(A.coupling[0], k[0])]
+                a, b, c = [len(qnsecs[ll][0]) for ll, _ in A.coupling[0]]
+                qn = i1 + i2 * a + i3 * a * b
+                assert v.ndim == 3
+                # Fortran order
+                v2 = (v / prefactor(k)).ravel(order='F')
+                assert False not in [x == y[0] for x, y
+                                     in zip(A.indexes, A.coupling[0])]
+                assert [True, True, False] == [x for _, x in A.coupling[0]]
+                blocks.append((qn, v.size, v2))
+            blocks = sorted(blocks, key=lambda x: x[0])
+            qn, sizes, blocks = list(zip(*blocks))
+            h5b['tel'] = np.concatenate(blocks)
+            h5b['beginblock'] = np.concatenate(([0], np.cumsum(sizes)))
+            h5A['qnumbers'] = qn
+
+    def _preprocess_h5_network(self):
+        """Manipulates the current network such that the T3NS follows the
+        convention as in the T3NS C-code (concerning coupling orders and so)
+        """
+        from copy import deepcopy
+        if not nx.algorithms.dag.is_directed_acyclic_graph(self):
+            raise ValueError('Graph should be a directed acyclic graph')
+        if max(x for _, x in self.degree()) > 3:
+            raise ValueError('Not a T3NS, nodes present with more than 3 legs')
+
+        tns = deepcopy(self)
+
+        # Check if the flow is correct for all the virtual legs,
+        # otherwise swap its direction
+        # TODO the swapping I should still implement
+        assert set([tns.sink]).union(nx.ancestors(tns, tns.sink)) == set(tns)
+
+        # order the sites
+        sites = list(nx.topological_sort(tns))
+        # order the virtual legs
+        bleg = []
+        lvedges = [l for l, (_, name) in tns._loose_legs.items() if not name]
+        for A in sites:
+            for ll, f in A.coupling[0]:
+                if f and ll in lvedges:
+                    bleg.append(ll)
+                elif not f:
+                    bleg.append(ll)
+
+        # change the coupling order if needed, i.e.
+        # The coupling should be IN, IN, OUT where the second IN is either
+        # a physical leg or appears after the first leg in bleg and
+        # OUT should be last in bleg
+        #
+        # The indexes should also be in this order!
+        for A in sites:
+            assert len(A.coupling) == 1
+            # Sort legs
+            lsrt = sorted(A.coupling[0], key=lambda x: bleg.index(x[0]) if
+                          x[0] in bleg else -1)
+            # Possibly physical legs are now in the first spot! should fix this
+            if lsrt[0][0] not in bleg:
+                lsrt[0], lsrt[1] = lsrt[1], lsrt[0]
+
+            assert lsrt[0][0] in bleg and lsrt[2][0] in bleg
+            assert [y for x, y in lsrt] == [True, True, False]
+            permute = [A.coupling[0].index(x) for x in lsrt]
+            A = A._swap0(0, permute)
+            assert A.coupling[0] == tuple(lsrt)
+
+            # Swapping the indexes of the tensor itself
+            permuteid = [A.indexes.index(x) for x, y in A.coupling[0]]
+            for k in A:
+                A[k] = np.transpose(A[k], axes=permuteid)
+
+        return tns, bleg, sites
+
+    def write_h5(self, filename, oldfilename):
+        """Writes to a new hdf5file.
+        """
+        import h5py
+        tns, bleg, sites = self._preprocess_h5_network()
+
+        fo = h5py.File(oldfilename, 'r')
+        fn = h5py.File(filename, "w")
+        fo.copy('hamiltonian', fn)  # copying hamiltonian
+        fo.close()
+
+        tns._write_h5_network(fn, bleg, sites)  # write the network
+        qnsecs = tns._write_h5_bookkeeper(fn, sites, bleg)  # write bookkeeper
+        tns._write_h5_T3NS(fn, qnsecs, sites)  # write wave function
+        fn.close()
+
 
 def read_h5(filename):
     """This reads a hdf5 file.
@@ -645,6 +855,7 @@ def read_h5(filename):
 
     tns = TNS(tensors)
     tns.name_loose_edges_from([[pl, f'p{ii}'] for ii, pl in enumerate(plegs)])
+    h5file.close()
 
     assert nx.algorithms.dag.is_directed_acyclic_graph(tns)
     return tns
