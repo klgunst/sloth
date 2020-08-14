@@ -48,8 +48,14 @@ def _prefswap0(permute):
         (1, 2, 0): fpref_231
     }[permute]
 
-    prefdict['SU(2)'] = su2pref_even if permute == [0, 1, 2] or \
-        permute == [1, 2, 0] or permute == [2, 0, 1] else su2pref_odd
+    prefdict['SU(2)'] = {
+        (0, 1, 2): su2pref_even,
+        (1, 0, 2): su2pref_odd,
+        (0, 2, 1): su2pref_odd,
+        (2, 1, 0): su2pref_odd,
+        (2, 0, 1): su2pref_even,
+        (1, 2, 0): su2pref_even
+    }[permute]
 
     return prefdict
 

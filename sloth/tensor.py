@@ -147,13 +147,18 @@ class Tensor:
         if self.substitutelegs(self.internallegs, A.internallegs) \
                 != A.coupling:
             return False
+        return self.elclose(A, permute, **kwargs)
 
+    def elclose(self, A, permute=None, **kwargs):
+        """Compares the elements of two tensors
+        """
         # List of unique keys
         keys = set(self).union(set(A))
         for key in keys:
             try:
                 a = self[key]
-                a = np.transpose(a, axes=permute)
+                if permute:
+                    a = np.transpose(a, axes=permute)
             except KeyError:
                 a = 0.
             b = A._data.get(key, 0.)
@@ -403,7 +408,11 @@ class Tensor:
         ndata = {}
         for okey in self:
             for nkey in mappingf(okey):
-                b = np.multiply(prefactorf(okey, nkey), self[okey])
+                pref = prefactorf(okey, nkey)
+                if np.isclose(pref, 0, atol=1e-12):
+                    continue
+
+                b = np.multiply(pref, self[okey])
                 if nkey in ndata:
                     ndata[nkey] += b
                 else:

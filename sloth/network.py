@@ -39,15 +39,29 @@ class TNS(nx.MultiDiGraph):
     def lexicographicalPsiteSort(self):
         """Returns the legs in p1, p2, p3, ... order
         """
-        legmap = {}
-        for ll, (_, name) in self._loose_legs.items():
-            if name and name[0] == 'p':
-                legmap[int(name[1:])] = ll
-        return tuple(legmap[i] for i in range(len(legmap)))
+        pLegs = self.getPhysicalLegs()
+        return sorted(pLegs, key=lambda x: int(self._loose_legs[x][1][1:]))
 
     @property
     def unique_legs(self):
         return set(x[-1] for x in self.edges(data='leg'))
+
+    @property
+    def max_bondDimsension(self):
+        return max(max(A.shape) for A in self)
+
+    @property
+    def orbitals(self):
+        """The orbitals in the current tensor network.
+        """
+        return set(int(name[1:]) for k, (_, name) in self._loose_legs.items()
+                   if name is not None and name[0] == 'p')
+
+    @property
+    def sink(self):
+        """Returns the sink tensor.
+        """
+        return nx.algorithms.dag.dag_longest_path(self)[-1]
 
     def add_nodes_from(self, nodes, **attr):
         for n in nodes:
@@ -184,19 +198,6 @@ class TNS(nx.MultiDiGraph):
         return set(k for k, (_, name) in self._loose_legs.items()
                    if name and name[0] == 'p')
 
-    @property
-    def orbitals(self):
-        """The orbitals in the current tensor network.
-        """
-        return set(int(name[1:]) for k, (_, name) in self._loose_legs.items()
-                   if name is not None and name[0] == 'p')
-
-    @property
-    def sink(self):
-        """Returns the sink tensor.
-        """
-        return nx.algorithms.dag.dag_longest_path(self)[-1]
-
     def nodes_with_leg(self, leg):
         """Returns the two nodes that border on the given leg.
         """
@@ -302,6 +303,46 @@ class TNS(nx.MultiDiGraph):
         tns.name_loose_edges_from([[ll, name] for ll, (_, name) in
                                    self._loose_legs.items()])
         return tns, U, S, V
+
+    def swap(self, leg1, leg2):
+        """Returns a network where leg1 and leg2 are swapped places
+
+        At this moment leg1 and leg2 should be part of neighbouring tensors
+
+        Args:
+            leg1, leg2: the legs and flows to swap.
+            Can be either loose_legs or edges of the network
+        """
+        As = []
+        for ll, f in (leg1, leg2):
+            if ll in self._loose_legs:
+                As.append(self._loose_legs[ll][0])
+            else:
+                for X, Y, leg in self.edges(data='legs'):
+                    if leg == ll:
+                        As.append(Y if f else X)
+                        break
+
+        A, B = As
+        cA, cB = [X.coupling_id(l[0]) for l, X in zip((leg1, leg2), (As))]
+        assert A.coupling[cA[0]][cA[1]][1] == leg1[1]
+        assert B.coupling[cB[0]][cB[1]][1] == leg2[1]
+
+        if not A.connections(B):
+            raise ValueError('leg1 and leg2 not elements of neighboring nodes')
+
+        tns, T = self.contracted_nodes(A, B)
+        T = T.swap(leg1[0], leg2[0])
+        tns, U, S, V = tns.svd(T, T.internallegs[0])
+        U @= S
+        return tns
+
+    def reortho(self):
+        """Reorthogonalizes the network
+        """
+        for tns, _, _ in self.depthFirst(loop=True):
+            pass
+        return tns
 
     def move_orthogonality_center(self, nodeA, nodeB, pass_interm=False,
                                   hook=None):
@@ -452,7 +493,7 @@ class TNS(nx.MultiDiGraph):
             tns, (Q, R) = tns.qr(A, leg)
             tns, A = tns.contracted_nodes(R, B)
             leg_map[oleg] = A.connections(Q).pop()
-            yield Q, A
+            yield tns, Q, A
 
     def two_rdms(self, current_ortho=None):
         rdms = {}
@@ -465,7 +506,7 @@ class TNS(nx.MultiDiGraph):
         vadj_map = {}
 
         totals = len(self.orbitals) * (len(self.orbitals) - 1) // 2
-        for Q, A in self.depthFirst(current_ortho):
+        for _, Q, A in self.depthFirst(current_ortho):
             # print(f'{len(rdms)} / {totals}')
             nleg = A.connections(Q).pop()
             Qa = Q.adj(nleg)
@@ -761,6 +802,7 @@ class TNS(nx.MultiDiGraph):
             permuteid = [A.indexes.index(x) for x, y in A.coupling[0]]
             for k in A:
                 A[k] = np.transpose(A[k], axes=permuteid)
+            A._indexes = [x for x, y in A.coupling[0]]
 
         return tns, bleg, sites
 
@@ -768,17 +810,19 @@ class TNS(nx.MultiDiGraph):
         """Writes to a new hdf5file.
         """
         import h5py
-        tns, bleg, sites = self._preprocess_h5_network()
+        tns, bleg, sites = self.reortho()._preprocess_h5_network()
 
         fo = h5py.File(oldfilename, 'r')
         fn = h5py.File(filename, "w")
-        fo.copy('hamiltonian', fn)  # copying hamiltonian
-        fo.close()
+        try:
+            fo.copy('hamiltonian', fn)  # copying hamiltonian
 
-        tns._write_h5_network(fn, bleg, sites)  # write the network
-        qnsecs = tns._write_h5_bookkeeper(fn, sites, bleg)  # write bookkeeper
-        tns._write_h5_T3NS(fn, qnsecs, sites)  # write wave function
-        fn.close()
+            tns._write_h5_network(fn, bleg, sites)  # write the network
+            qnsecs = tns._write_h5_bookkeeper(fn, sites, bleg)  # write bookie
+            tns._write_h5_T3NS(fn, qnsecs, sites)  # write wave function
+        finally:
+            fo.close()
+            fn.close()
 
 
 def read_h5(filename):
