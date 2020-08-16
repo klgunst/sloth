@@ -670,14 +670,17 @@ class TNS(nx.MultiDiGraph):
 
         return tns
 
-    def getPhysicalDistances(self):
+    def getPhysicalDistances(self, lexico=False):
         """Returns a matrix with the path lengths between all the physical
         legs.
 
         Returns:
             Distance between each two physical legs
         """
-        pLegs = self.lexicographicalPsiteSort()
+        if lexico:
+            pLegs = self.lexicographicalPsiteSort()
+        else:
+            pLegs = self.topologicalPsiteSort()
         pSites = {N: set(pLegs).intersection(N.indexes).pop() for N in self
                   if set(pLegs).intersection(N.indexes)}
         D = np.zeros((len(pLegs), len(pLegs)), dtype=int)
@@ -900,6 +903,54 @@ class TNS(nx.MultiDiGraph):
         finally:
             fo.close()
             fn.close()
+
+    def plotEntanglement(self, mutualInfo=None, vmin=0, vmax=None,
+                         cmap='tab20b', **kwargs):
+        """Makes a plot of the entanglement in each bond and the mutual
+        information in topological order
+        """
+        import matplotlib.pyplot as plt
+        from sloth.utils import renyi_entropy
+
+        nodes = list(nx.topological_sort(self))
+        pLegs = self.getPhysicalLegs()
+        X = [pLegs.intersection(N.indexes) for N in nodes]
+        pLegs = [x.pop() for x in X if x]
+        topo_edges = [A.connections(B).pop() for A, B in zip(nodes, nodes[1:])]
+
+        if mutualInfo is None:
+            mutualInfo = self.mutualInfo(**kwargs)
+        # sort to topo order
+        lexicoL = self.lexicographicalPsiteSort()
+        swap = [lexicoL.index(ll) for ll in pLegs]
+        mutualInfo = mutualInfo[swap, ...][:, swap, ...]
+
+        svals = self.calculate_singular_values()
+
+        x = np.arange(start=0.00, stop=1.01, step=0.01)
+        sv = np.array([[renyi_entropy(svals[k], a) for k in topo_edges]
+                       for a in x])
+
+        keys = {
+            'origin': 'lower',
+            'aspect': 'auto',
+            'cmap': cmap,
+            'vmin': vmin,
+            'vmax': vmax
+        }
+
+        fig, axs = plt.subplots(ncols=2)
+
+        mat = axs[0].matshow(sv, **keys)
+        axs[0].set_ylabel(r'Rényi $\alpha$-value')
+        axs[0].set_yticklabels([f"{yy / 100.:.1f}"
+                                for yy in axs[0].get_yticks()])
+        axs[0].xaxis.tick_bottom()
+        axs[0].set_xlabel('bond')
+        fig.colorbar(mat, ax=axs[0], pad=0.02, fraction=0.1)
+        mat = axs[1].matshow(mutualInfo, aspect='auto', cmap='Greys')
+        fig.colorbar(mat, ax=axs[1], pad=0.02, fraction=0.1)
+        return fig, axs
 
 
 def read_h5(filename):
