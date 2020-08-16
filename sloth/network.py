@@ -17,13 +17,20 @@ class TNS(nx.MultiDiGraph):
     def __init__(self, data=None, **attr):
         super(TNS, self).__init__(**attr)
 
+        self._orthoCenter = None
         self._loose_legs = {}
         if data is not None:
             self.add_nodes_from(data, **attr)
 
         if isinstance(data, TNS):
             self._loose_legs = data._loose_legs.copy()
+            self._orthoCenter = data._orthoCenter
 
+    @property
+    def orthoCenter(self):
+        return self._orthoCenter
+
+    @property
     def isMPS(self):
         """Checks if it is an MPS (otherwise a TTNS)
         """
@@ -140,6 +147,8 @@ class TNS(nx.MultiDiGraph):
 
             color_map = ['lightblue' if self.degree(s) < 3 else 'green'
                          for s in self]
+            if self.orthoCenter in self:
+                color_map[list(self).index(self.orthoCenter)] = 'grey'
 
             # make a new graph keeping all branching tensors and edge tensors
             for s in self:
@@ -205,7 +214,7 @@ class TNS(nx.MultiDiGraph):
             if ll == leg:
                 return u, v
 
-    def contracted_nodes(self, A, B):
+    def contracted_nodes(self, A, B, simplify=True):
         """Contracts two nodes of a given graph and returns the resulting
         graph.
 
@@ -221,8 +230,13 @@ class TNS(nx.MultiDiGraph):
             C = A @ data['singular values']
         else:
             C = A
-        T = C @ B
+        T = C.contract(B, (list(C.connections(B)),) * 2)
+        if simplify:
+            T = T.simplify()
         result = TNS(tuple(T if n == A else n for n in self if n != B))
+
+        if self.orthoCenter in (A, B):
+            result._orthoCenter = T
 
         result.name_loose_edges_from([[ll, name] for ll, (_, name) in
                                       self._loose_legs.items() if name])
@@ -279,22 +293,27 @@ class TNS(nx.MultiDiGraph):
 
         Edge decides how to split the node.
         """
+        if self.orthoCenter != node:
+            raise ValueError('node is not orthocenter')
+
         tns = TNS(T for T in self if T != node)
         Q, R = node.qr(leg)
         tns.add_nodes_from((Q, R))
+        tns._orthoCenter = R
         tns.name_loose_edges_from([[ll, name] for ll, (_, name) in
                                    self._loose_legs.items()])
         if intermittent_renorm:
             R /= np.linalg.norm(R.ravel())
         return tns, (Q, R)
 
-    def svd(self, node, leg):
+    def svd(self, node, leg, maxD=None):
         """Does an SVD on a node along the internal leg.
 
         The singular values are saved on the leg itself and also returned.
         """
+        maxD = maxD if maxD else self.max_bondDimsension
         tns = TNS(T for T in self if T != node)
-        U, S, V = node.svd(leg, compute_uv=True)
+        U, S, V = node.svd(leg, compute_uv=True, maxD=maxD)
         tns.add_nodes_from((U, V))
 
         # TODO: Should do this in another way
@@ -304,7 +323,7 @@ class TNS(nx.MultiDiGraph):
                                    self._loose_legs.items()])
         return tns, U, S, V
 
-    def swap(self, leg1, leg2):
+    def swap(self, leg1, leg2, ortho_on=None, **kwargs):
         """Returns a network where leg1 and leg2 are swapped places
 
         At this moment leg1 and leg2 should be part of neighbouring tensors
@@ -313,6 +332,8 @@ class TNS(nx.MultiDiGraph):
             leg1, leg2: the legs and flows to swap.
             Can be either loose_legs or edges of the network
         """
+        ortho_on = leg1[0] if not ortho_on else ortho_on
+        assert ortho_on in (leg1[0], leg2[0])
         As = []
         for ll, f in (leg1, leg2):
             if ll in self._loose_legs:
@@ -331,10 +352,15 @@ class TNS(nx.MultiDiGraph):
         if not A.connections(B):
             raise ValueError('leg1 and leg2 not elements of neighboring nodes')
 
-        tns, T = self.contracted_nodes(A, B)
+        tns, T = self.contracted_nodes(A, B, simplify=False)
+        assert len(T.coupling) == 2
         T = T.swap(leg1[0], leg2[0])
-        tns, U, S, V = tns.svd(T, T.internallegs[0])
-        U @= S
+        assert len(T.coupling) == 2
+        tns, U, S, V = tns.svd(T, T.internallegs[0], **kwargs)
+        X = U if ortho_on in U.indexes else V
+        assert ortho_on in X.indexes
+        X @= S
+        tns._orthoCenter = X
         return tns
 
     def reortho(self):
@@ -592,6 +618,57 @@ class TNS(nx.MultiDiGraph):
 
         mutualInformation = np.squeeze(mutualInformation)
         return mutualInformation
+
+    def reorderPhysical(self, neworder, current_ortho=None, maxD=None):
+        """Reordering the physical indices on the tensor network.
+
+        At this moment only for MPSs.
+        Args:
+            neworder: List of legs for the new configuration topological
+            ordered.
+        """
+        current_ortho = self.sink if not current_ortho else current_ortho
+        if not self.isMPS:
+            raise NotImplementedError('Only for MPS implemented')
+
+        swapped = True
+        # Bubble sort
+        legs = [A.connections(B).pop() for A, B in
+                self.traverse_depthFirst(current_ortho, True)]
+        leg_map = {}
+
+        A = current_ortho
+        tns = self
+        while swapped:
+            swapped = False
+            for oleg in legs:
+                leg = leg_map.get(oleg, oleg)
+                nA, nB = tns.nodes_with_leg(leg)
+                # A is the current ortho center
+                assert A == nA or A == nB
+                B = nB if nA == A else nA  # B is the other tensor than A
+                Al = set(A.indexes).intersection(neworder)
+                Bl = set(B.indexes).intersection(neworder)
+                assert len(Al) == 1
+                assert len(Bl) == 1
+                Al, Bl = Al.pop(), Bl.pop()
+                if (neworder.index(Al) > neworder.index(Bl)) != \
+                        (B in nx.ancestors(tns, A)):
+                    # need a swap
+                    tns = tns.swap((Al, True), (Bl, True), ortho_on=Bl,
+                                   maxD=maxD)
+                    Al, Bl = Bl, Al
+                    swapped = True
+
+                A = tns._loose_legs[Al][0]
+                B = tns._loose_legs[Bl][0]
+                leg = A.connections(B).pop()
+
+                tns, (Q, R) = tns.qr(A, leg)
+                tns, A = tns.contracted_nodes(R, B)
+                leg_map[oleg] = A.connections(Q).pop()
+
+        return tns
 
     def getPhysicalDistances(self):
         """Returns a matrix with the path lengths between all the physical
@@ -900,6 +977,7 @@ def read_h5(filename):
     tns = TNS(tensors)
     tns.name_loose_edges_from([[pl, f'p{ii}'] for ii, pl in enumerate(plegs)])
     h5file.close()
+    tns._orthoCenter = tns.sink
 
     assert nx.algorithms.dag.is_directed_acyclic_graph(tns)
     return tns

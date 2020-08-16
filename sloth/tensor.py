@@ -317,6 +317,30 @@ class Tensor:
 
         return self.contract(B, (list(connections),) * 2).simplify()
 
+    def __imatmul__(self, B):
+        """Trying to completely contract self and B for all matching bonds.
+        """
+        if isinstance(B, dict):
+            if B['leg'] not in self.indexes:
+                raise ValueError('Leg of singular values not an indexes '
+                                 'of self')
+
+            if B['symmetries'] != self.symmetries:
+                raise ValueError('Not same symmetries')
+
+            x, y = self.coupling_id(B['leg'])
+            for k in self:
+                newshape = [1] * len(self[k].shape)
+                newshape[self.indexes.index(B['leg'])] = -1
+                self[k] *= B[k[x][y]].reshape(newshape)
+            return self
+
+        connections = self.connections(B)
+        if not connections:
+            raise ValueError(f'No connections found between {self} and {B}')
+
+        return self.contract(B, (list(connections),) * 2).simplify()
+
     def __imul__(self, a):
         for key in self:
             self[key] *= a
@@ -364,7 +388,6 @@ class Tensor:
         # Coupling and thus keys for the dictionary are
         # [self.coupling, B.coupling] appended to each other with the
         # appropriate legs substituted.
-        shapes = [len(T.indexes) for T in AB]
         C.coupling = tuple(el for T, ll in zip(AB, legs)
                            for el in T.substitutelegs(ll, ilegs))
 
@@ -380,12 +403,9 @@ class Tensor:
         for kk in set(Akeys).intersection(Bkeys):
             for Ak in Akeys[kk]:
                 Abl = self[Ak]
-                assert len(Abl.shape) == shapes[0]
                 for Bk in Bkeys[kk]:
                     Bbl = B[Bk]
-                    assert len(Bbl.shape) == shapes[1]
                     C[(*Ak, *Bk)] = np.tensordot(Abl, Bbl, oid)
-                    assert len(C[(*Ak, *Bk)].shape) == len(C.indexes)
 
         index = [x for l, T in zip(legs, AB) for x in T.indexes if x not in l]
 
@@ -833,7 +853,7 @@ class Tensor:
 
         return Q, R
 
-    def svd(self, leg=None, compute_uv=True):
+    def svd(self, leg=None, compute_uv=True, maxD=0):
         """Executes a SVD along the given leg(s).
 
         Args:
@@ -940,6 +960,34 @@ class Tensor:
                     U[key] = u[sl, :].reshape(*dims, -1) * pref(key, iU) * Sprf
                 for key, (sl, dims) in Vslice.items():
                     V[key] = v[:, sl].reshape(-1, *dims) * pref(key, iV) * Sprf
+
+            # Truncate
+            if maxD != 0:
+                def multplic(key):
+                    return np.prod([k + 1 for k, s in zip(key, S['symmetries'])
+                                    if s == 'SU(2)'])
+                wS = {k: multplic(k) * v for k, v in S.items()
+                      if isinstance(k, tuple)}
+                sort = np.concatenate([v for k, v in wS.items()])
+                if len(sort) > maxD:
+                    Smin = np.sort(sort)[::-1][maxD]
+                    for k in list(S):
+                        if isinstance(k, tuple):
+                            S[k] = S[k][wS[k] > Smin]
+                            if len(S[k]) == 0:
+                                del S[k]
+
+                    ci1, ci2 = U.coupling_id(S['leg'])
+                    for k in list(U):
+                        U[k] = U[k][..., wS[k[ci1][ci2]] > Smin]
+                        if U[k].size == 0:
+                            del U._data[k]
+
+                    ci1, ci2 = V.coupling_id(S['leg'])
+                    for k in list(V):
+                        V[k] = V[k][wS[k[ci1][ci2]] > Smin, ...]
+                        if V[k].size == 0:
+                            del V._data[k]
 
             return U, S, V
         else:

@@ -54,7 +54,7 @@ def renyi_entropy(svals, α=1):
         return np.log(spomega, where=np.logical_not(is_zero)) / (1 - α)
 
 
-def simAnnealing(Iij, Dij, iterations=1000, β=1, η=2, initstate=None,
+def simAnnealing(Iij, Dij, iterations=1000, β=1, initstate=None,
                  swappairs=None):
     from random import sample, random
     assert Iij.shape == Dij.shape and Iij.shape[0] == Iij.shape[1]
@@ -65,14 +65,12 @@ def simAnnealing(Iij, Dij, iterations=1000, β=1, η=2, initstate=None,
     elif len(initstate) != nsites:
         raise ValueError('initstate is not correct length')
 
-    Dij_η = np.power(Dij, η)
-
     def costfunction(state):
         """The default cost function.
 
-        Cost is Σ Iij * |i - j|^η
+        Cost is Σ Iij * Dij
         """
-        return np.sum(Iij[state][:, state] * Dij_η)
+        return np.sum(Iij[state][:, state] * Dij)
 
     def doswap(nsites, swappairs=None):
         from random import sample
