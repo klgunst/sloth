@@ -917,6 +917,36 @@ class Tensor:
 
         return Q, R
 
+    @staticmethod
+    def truncate_svd(U, S, V, maxD):
+        su2ids = [i for i, s in enumerate(S['symmetries']) if s == 'SU(2)']
+
+        def multplic(key):
+            return np.prod([key[i] + 1 for i in su2ids])
+
+        wS = {k: multplic(k) * v for k, v in S.items() if isinstance(k, tuple)}
+        sort = np.concatenate([v for k, v in wS.items()])
+
+        if len(sort) <= maxD or maxD == 0:
+            return U, S, V
+
+        Smin = np.sort(sort)[::-1][maxD]
+        for k in list(S):
+            if isinstance(k, tuple):
+                S[k] = S[k][wS[k] > Smin]
+                if len(S[k]) == 0:
+                    del S[k]
+
+        ci1, ci2 = U.coupling_id(S['leg'])
+        U._data = {k: v[..., wS[k[ci1][ci2]] > Smin]
+                   for k, v in U.items() if k[ci1][ci2] in S}
+
+        ci1, ci2 = V.coupling_id(S['leg'])
+        V._data = {k: v[wS[k[ci1][ci2]] > Smin, ...]
+                   for k, v in V.items() if k[ci1][ci2] in S}
+
+        return U, S, V
+
     def svd(self, leg=None, compute_uv=True, maxD=0):
         """Executes a SVD along the given leg(s).
 
@@ -976,8 +1006,8 @@ class Tensor:
             Umap = [self.coupling.index(c) for c in U.coupling]
             Vmap = [self.coupling.index(c) for c in V.coupling]
 
-            iU = [U.coupling.index(c) for c in U.internallegs]
-            iV = [V.coupling.index(c) for c in V.internallegs]
+            iU = [U.coupling_id(c) for c in U.internallegs]
+            iV = [V.coupling_id(c) for c in V.internallegs]
 
             def pref(key, mp):
                 return np.prod(
@@ -1025,35 +1055,7 @@ class Tensor:
                 for key, (sl, dims) in Vslice.items():
                     V[key] = v[:, sl].reshape(-1, *dims) * pref(key, iV) * Sprf
 
-            # Truncate
-            if maxD != 0:
-                def multplic(key):
-                    return np.prod([k + 1 for k, s in zip(key, S['symmetries'])
-                                    if s == 'SU(2)'])
-                wS = {k: multplic(k) * v for k, v in S.items()
-                      if isinstance(k, tuple)}
-                sort = np.concatenate([v for k, v in wS.items()])
-                if len(sort) > maxD:
-                    Smin = np.sort(sort)[::-1][maxD]
-                    for k in list(S):
-                        if isinstance(k, tuple):
-                            S[k] = S[k][wS[k] > Smin]
-                            if len(S[k]) == 0:
-                                del S[k]
-
-                    ci1, ci2 = U.coupling_id(S['leg'])
-                    for k in list(U):
-                        U[k] = U[k][..., wS[k[ci1][ci2]] > Smin]
-                        if U[k].size == 0:
-                            del U._data[k]
-
-                    ci1, ci2 = V.coupling_id(S['leg'])
-                    for k in list(V):
-                        V[k] = V[k][wS[k[ci1][ci2]] > Smin, ...]
-                        if V[k].size == 0:
-                            del V._data[k]
-
-            return U, S, V
+            return self.truncate_svd(U, S, V, maxD)
         else:
             # Plain svd of a R matrix. Only calculates the singular values
             if len(self.coupling) != 1:
@@ -1170,17 +1172,18 @@ class Tensor:
 
     def swap(self, fl, sl):
         cids = [self.coupling_id(ll) for ll in (fl, sl)]
-        conn = set(c[0] for c in self.coupling[cids[0][0]]).intersection(
-            c[0] for c in self.coupling[cids[1][0]])
+        cnx = self.get_couplingnetwork().to_undirected(as_view=True)
         if cids[0][0] == cids[1][0]:
             # Do _swap0
             permute = list(range(3))
             permute[cids[0][1]], permute[cids[1][1]] = \
                 permute[cids[1][1]], permute[cids[0][1]]
             return self._swap0(cids[0][0], permute)
-        elif conn:
-            if len(conn) != 1:
-                raise NotImplementedError
+        elif self.coupling[cids[1][0]] in \
+                cnx.neighbors(self.coupling[cids[0][0]]):
             return self._swap1(*[x for x in zip(*cids)])
+        elif set(nx.common_neighbors(cnx,
+                                     *[self.coupling[i] for i, _ in cids])):
+            return self._swap2(*[x for x in zip(*cids)])
         else:
             raise NotImplementedError

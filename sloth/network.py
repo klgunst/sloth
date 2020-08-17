@@ -217,19 +217,12 @@ class TNS(nx.MultiDiGraph):
     def contracted_nodes(self, A, B, simplify=True):
         """Contracts two nodes of a given graph and returns the resulting
         graph.
-
-        If singular values live on the leg in between than these are also
-        contracted
         """
         if A not in nx.all_neighbors(self, B):
             raise ValueError(
                 'The two tensors are not neighbours in the network')
 
-        data = self.to_undirected(as_view=True).edges[A, B, 0]
-        if 'singular values' in data:
-            C = A @ data['singular values']
-        else:
-            C = A
+        C = A
         T = C.contract(B, (list(C.connections(B)),) * 2)
         if simplify:
             T = T.simplify()
@@ -240,17 +233,6 @@ class TNS(nx.MultiDiGraph):
 
         result.name_loose_edges_from([[ll, name] for ll, (_, name) in
                                       self._loose_legs.items() if name])
-
-        for u, v, k, data in self.edges(data=True, keys=True):
-            if 'singular values' in data:
-                if u in (A, B) and v in (A, B) and k == 0:
-                    # This singular values should not be added
-                    continue
-
-                u = T if u in (A, B) else u
-                v = T if v in (A, B) else v
-                result.edges[u, v, k]['singular values'] = \
-                    data['singular values']
 
         return result, T
 
@@ -293,8 +275,8 @@ class TNS(nx.MultiDiGraph):
 
         Edge decides how to split the node.
         """
-        if self.orthoCenter != node:
-            raise ValueError('node is not orthocenter')
+        # if self.orthoCenter != node:
+        #     raise ValueError('node is not orthocenter')
 
         tns = TNS(T for T in self if T != node)
         Q, R = node.qr(leg)
@@ -311,13 +293,13 @@ class TNS(nx.MultiDiGraph):
 
         The singular values are saved on the leg itself and also returned.
         """
-        maxD = maxD if maxD else self.max_bondDimsension
+        maxD = maxD if maxD else 0
         tns = TNS(T for T in self if T != node)
         U, S, V = node.svd(leg, compute_uv=True, maxD=maxD)
         tns.add_nodes_from((U, V))
 
         # TODO: Should do this in another way
-        tns.edges[U, V, 0]['singular values'] = S
+        # tns.edges[U, V, 0]['singular values'] = S
 
         tns.name_loose_edges_from([[ll, name] for ll, (_, name) in
                                    self._loose_legs.items()])
@@ -467,19 +449,186 @@ class TNS(nx.MultiDiGraph):
         assert lset.union(rset) == self.orbitals
         return lset, rset
 
-    def disentangle(self, node_iterator=None):
+    def disentangle(self, onlyPswap=False, max_sweeps=1, maxD=None, alpha=0.25,
+                    beta=20, pass_interm=False, verbose=False):
         """General swapping of indexes of two neighbouring tensors.
 
         node_iterator should return the neighbouring nodes to contract every
         step. If none it just sweeps and does whatever it feels like
         """
-        raise NotImplementedError
-        tns = self
-        # if node_iterator is None:
-        #    node_iterator = _simple_sweep_model
+        if verbose:
+            print(f"Disentangling with alpha = {alpha}, beta = {beta}")
 
-        for A, B in node_iterator(tns):
-            tns, T = tns.contracted_nodes(A, B)
+        if pass_interm:
+            tns_interm = [self]
+
+        counter = 0
+        plegs = self.getPhysicalLegs()
+        lastl = set(ll for ll, (x, y) in self._loose_legs.items()
+                    if x == self.sink and not y).pop()
+
+        nodo = set(self._loose_legs)
+        assert lastl in nodo
+        assert not plegs.difference(nodo)
+        visited = set(nodo)
+
+        def nextLeg(tns, A):
+            cnx = A.get_couplingnetwork()
+            # Nodes without predecessors in cnx
+            rnodes = set(n for n in cnx if not set(cnx.predecessors(n)))
+
+            # All the incoming indexes of the root nodes with plegs and
+            # previously visited legs removed
+            nleg = set(x for n in rnodes for x, y in n if y
+                       ).difference(visited)
+
+            inlegs = set(x for c in A.coupling for x, y in c
+                         if y and x in A.indexes).difference(visited)
+            if nleg:
+                nleg = nleg.pop()
+            elif inlegs:
+                nleg = inlegs.pop()
+            else:
+                # No inward unvisited legs, instead folow the outward leg
+                outlegs = set(x for c in A.coupling for x, y in c
+                              if not y and x in A.indexes)
+                assert len(outlegs) == 1
+                nleg = outlegs.pop()
+
+            assert nleg in A.indexes
+            return nleg
+
+        def newMultisite(tns, A, nleg):
+            X, Y = tns.nodes_with_leg(nleg)
+            tns, A = tns.contracted_nodes(X, Y, simplify=False)
+
+            if len(A.coupling) >= 3 or len(plegs.intersection(A.indexes)) == 2:
+                return tns, A
+            else:
+                nleg = nextLeg(tns, A)
+                return newMultisite(tns, A, nleg)
+
+        def splitMultisite(tns, A, nleg):
+            assert len(A.coupling) > 1
+            legs = A.get_legs()
+            # Get the internal leg furthest of nleg
+            if len(A.coupling) == 2:
+                il = A.internallegs[0]
+            else:
+                assert len(A.coupling) == 3
+                ll = [set(x).intersection(A.internallegs)
+                      for x in legs if nleg in x]
+                assert len(ll) == 1
+                il = set(A.internallegs).difference([ll[0].pop()]).pop()
+
+            tns, U, S, V = tns.svd(A, il, maxD)
+            visited.add(il)
+            X = U if nleg in U.indexes else V
+            X @= S
+            assert nleg in X.indexes
+            tns._orthoCenter = X
+            return tns, X
+
+        def full_entropy(A):
+            from sloth.utils import renyi_entropy
+
+            entanglement = {}
+            for l in A.internallegs:
+                U, S, V = A.svd(leg=l)
+                entanglement[l] = renyi_entropy(S, alpha)
+                if len(U.coupling) > 1:
+                    A = U @ S
+                else:
+                    A = V @ S
+            return entanglement
+
+        def doSwap(tns, A):
+            from random import sample, random
+            from itertools import product
+            phys = plegs.intersection(A.indexes)
+            Pswap = len(phys) == 2
+            if Pswap and onlyPswap:
+                # Nothing should happen
+                return tns, A
+            assert len(phys) <= 2
+            if Pswap:
+                l1, l2 = phys
+            else:
+                # Do not switch the outer leg!
+                # Topological this has no consequences and 'en plus' i do not
+                # need to switch any internal legs from direction.
+                switch = {}
+                for ll in set(A.indexes).difference(phys):
+                    # outward leg not included
+                    if A.flowof(ll):
+                        ii = A.coupling_id(ll)[0]
+                        if ii in switch:
+                            switch[ii].append(ll)
+                        else:
+                            switch[ii] = [ll]
+
+                assert len(switch) == 2
+                slist = list(product(*list(switch.values())))
+                l1, l2 = sample(slist, 1)[0]
+
+            Ac = A.shallowcopy().swap(l1, l2)
+            e1 = sum(full_entropy(A).values())
+            e2 = sum(full_entropy(Ac).values())
+            accepted = False
+            P = np.exp(- beta * (e2 - e1))
+            if random() < P:
+                accepted = True
+                tnsx = TNS(T for T in tns if T != A)
+                tnsx.add_node(Ac)
+                tnsx.name_loose_edges_from([[ll, name] for ll, (_, name) in
+                                           tns._loose_legs.items()])
+                tnsx._orthoCenter = Ac
+                tns = tnsx
+                A = Ac
+            if verbose:
+                print(f'Swapping of {"physical" if Pswap else "virtual "} '
+                      f'edges {"accepted" if accepted else "denied  "} with '
+                      f'(P, e1, e2) = ({P:.3f}, {e1:.5f}, {e2:.5f})')
+
+            return tns, A
+
+        tns = self
+        A = tns.sink
+        nleg = nextLeg(tns, A)
+
+        while counter < max_sweeps:
+            tns, A = newMultisite(tns, A, nleg)
+            if pass_interm:
+                tns_interm.append(tns)
+            # swapping
+            tns, A = doSwap(tns, A)
+            nleg = nextLeg(tns, A)
+            tns, A = splitMultisite(tns, A, nleg)
+            if pass_interm:
+                tns_interm.append(tns)
+
+            if nleg == lastl:
+                while len(A.coupling) > 1:
+                    tns, A = splitMultisite(tns, A, nleg)
+                counter += 1
+                visited = set(nodo)
+                nleg = nextLeg(tns, A)
+
+        if pass_interm:
+            return tns, tns_interm
+        else:
+            return tns
+
+    def MPStoT3NS(self):
+        if not self.isMPS:
+            raise NotImplementedError('Only for MPS implemented')
+
+        tns = self
+
+        # leave one out.
+        for ll in self.topologicalPsiteSort()[1:-1:2]:
+            tns, _ = tns.qr(tns._loose_legs[ll][0], ll)
+        return tns.reortho()
 
     def traverse_depthFirst(self, current_ortho=None, loop=False):
         current_ortho = self.sink if not current_ortho else current_ortho
@@ -668,6 +817,7 @@ class TNS(nx.MultiDiGraph):
                 tns, A = tns.contracted_nodes(R, B)
                 leg_map[oleg] = A.connections(Q).pop()
 
+        assert tns.topologicalPsiteSort() == neworder
         return tns
 
     def getPhysicalDistances(self, lexico=False):
@@ -715,7 +865,7 @@ class TNS(nx.MultiDiGraph):
         h5n['sitetoorb'] = [
             np.int32(self._loose_legs[
                 pLegs.intersection(A.indexes).pop()][1][1:])
-            if pLegs.intersection(A.indexes) else -1 for A in sites]
+            if pLegs.intersection(A.indexes) else np.int32(-1) for A in sites]
 
         bonds = []
         for A in sites:
