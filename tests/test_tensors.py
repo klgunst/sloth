@@ -191,7 +191,7 @@ class TestTensors:
             assert D.isclose(D2._swap2(cids, ii))  # Double swap is the same
 
     def test_adjoint(self, create_tensors, helpers):
-        A, B = create_tensors
+        A, B, _ = create_tensors
 
         # Singular values along loose edges
         for leg in A.indexes:
