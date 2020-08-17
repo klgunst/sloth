@@ -525,6 +525,70 @@ class Tensor:
         self._manipulate_coupling(mappingf, prefactorf)
         return self
 
+    def _swap2(self, cids, iids):
+        """Switches two legs between two next-to-nearest neighbouring
+        couplings.
+        """
+        # The coupling indexes of the two legs to swap
+        c1, c2 = cids
+        # The index of the two legs to swap within the given coupling
+        i1, i2 = iids
+        assert c1 != c2
+
+        # Get the connecting coupling between the two couplings
+        cnx = self.get_couplingnetwork().to_undirected(as_view=True)
+        ci = set(nx.common_neighbors(cnx, *[self.coupling[ii] for ii in cids]))
+        if len(ci) != 1:
+            raise ValueError(f'cids: {cids} have {len(ci)} common neighbors')
+        ci = self.coupling.index(ci.pop())
+
+        l1 = cnx.edges[self.coupling[c1], self.coupling[ci], 0]['leg']
+        l2 = cnx.edges[self.coupling[c2], self.coupling[ci], 0]['leg']
+
+        # index of the internal leg in c1 and c2
+        legs = self.get_legs()
+        il1, il2 = [[legs[x].index(ll) for x in (y, ci)]
+                    for y, ll in zip(cids, (l1, l2))]
+
+        assert il1[0] != i1 and il2[0] != i2
+        assert il1[1] != il2[1]
+        # Check that the flow is consistent along the internal bond
+        assert self.coupling[c1][il1[0]][1] is not self.coupling[ci][il1[1]][1]
+        assert self.coupling[c2][il2[0]][1] is not self.coupling[ci][il2[1]][1]
+
+        def permute_key(key):
+            copy = list(list(k) for k in key)
+            copy[c1][i1], copy[c2][i2] = copy[c2][i2], copy[c1][i1]
+            return copy
+        self._coupling = tuple(tuple(c) for c in permute_key(self.coupling))
+        f1, f2, fi = ([x[1] for x in self.coupling[c]] for c in (c1, c2, ci))
+
+        def mappingf(okey):
+            nk = permute_key(okey)
+            # All good interal symmetry sectors in for the swapped 1st coupling
+            x = set(sls.allowed_couplings(nk[c1], f1, il1[0], self.symmetries))
+            y = set(sls.allowed_couplings(nk[c2], f2, il2[0], self.symmetries))
+            for kk1 in x:
+                for kk2 in y:
+                    # Assign the key of the internal leg
+                    nk[c1][il1[0]], nk[ci][il1[1]] = kk1, kk1
+                    nk[c2][il2[0]], nk[ci][il2[1]] = kk2, kk2
+                    if sls.is_allowed_coupling(nk[ci], fi, self.symmetries):
+                        yield tuple(tuple(e) for e in nk)
+
+        prefdict = sls._prefswap2(iids, il1, il2, f1, f2, fi)
+
+        def prefactorf(okey, nkey):
+            flokey = [list(x) for x in
+                      zip(*[el for j in (c1, c2, ci) for el in okey[j]])]
+            flnkey = [list(x) for x in
+                      zip(*[el for j in (c1, c2, ci) for el in nkey[j]])]
+            return np.prod([prefdict.get(ss, lambda x, y: 1.)(o, n) for
+                            o, n, ss in zip(flokey, flnkey, self.symmetries)])
+
+        self._manipulate_coupling(mappingf, prefactorf)
+        return self
+
     def _remove_vacuumcoupling(self):
         """Removes couplings to the vacuum, if the tensor has multiple
         couplings.

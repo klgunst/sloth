@@ -1,4 +1,4 @@
-from sloth.utils import wigner6j
+from sloth.utils import wigner6j, wigner9j
 import numpy as np
 from functools import reduce
 
@@ -119,6 +119,81 @@ def _prefswap1(ll, il):
         w6j = wigner6j(nk[sb], nk[rb], nk[ib], nk[sa], nk[ra], ok[ia])
         pr = (nk[ia] + 1) * w6j * \
             (1. if (nk[ia] + ok[ia] - ok[sa] - ok[sb]) % 4 == 0 else -1.)
+        return reduce(lambda x, y: x * y, [p(ok, nk) for p in pref_funcs], pr)
+
+    return {
+        'fermionic': fpref,
+        'SU(2)': lambda x, y: su2pref(x, y, pref_funcs)
+    }
+
+
+def _prefswap2(si, il1, il2, f1, f2, fi):
+    def fpref(okey, nkey):
+        # Bring the internals next to each other as <x||x>
+        parity = sum(okey[il1[0] + 1:il1[1] + 6 + f1[il1[0]]]) * okey[il1[0]]
+        # Remove internals is equal to setting it to zero
+        okey[il1[0]], okey[il1[1] + 6] = 0, 0
+
+        parity += sum(okey[il2[0] + 4:il2[1] + 6 + f2[il2[0]]]) \
+            * okey[il2[0] + 3]
+        okey[il2[0] + 3], okey[il2[1] + 6] = 0, 0
+
+        # inbetweens, ignoring the removed internal legs
+        # Swap the two legs
+        parity += sum(okey[si[0] + 1: si[1] + 3]) \
+            * (okey[si[0]] + okey[si[1] + 3]) + okey[si[0]] * okey[si[1] + 3]
+
+        # Bring the new internals back to original position
+        parity += sum(nkey[il1[0] + 1:il1[1] + 6 + f1[il1[0]]]) * nkey[il1[0]]
+        nkey[il1[0]], nkey[il1[1] + 6] = 0, 0
+
+        parity += sum(nkey[il2[0] + 4:il2[1] + 6 + f2[il2[0]]]) \
+            * nkey[il2[0] + 3]
+        nkey[il2[0] + 3], nkey[il2[1] + 6] = 0, 0
+
+        return -1. if parity % 2 == 1 else 1.
+
+    # Swapping is (j1, j2, j), (j3, j4, j) -> (j1, j3, j), (j2, j4, j)
+    # cyclic permutations of each coupling allowed without prefactor,
+    # acyclic permutations give raise to a prefactor.
+
+    # Acyclic permutation if: (sa + 1) % 3 != ia or (sb - 1) % 3 != ib
+    # Once this taken into account, use eq. 6j-swap from phd defense
+    def su2acyclic(k):
+        # Acyclic minus sign for (j1, j2, j3).
+        assert sum(k) % 2 == 0
+        return 1. if sum(k) % 4 == 0 else -1.
+
+    pref_funcs = []
+    # Acyclic permutation of first coupling
+    if (si[0] + 1) % 3 != il1[0]:
+        pref_funcs.append(lambda x, y: su2acyclic(x[:3]) * su2acyclic(y[:3]))
+
+    # Acyclic permutation of second coupling
+    if (si[1] - 1) % 3 != il2[0]:
+        pref_funcs.append(lambda x, y: su2acyclic(x[3:6]) * su2acyclic(y[3:6]))
+
+    # Acyclic permutation of third coupling
+    if (il1[1] + 1) % 3 != il2[1]:
+        pref_funcs.append(lambda x, y: su2acyclic(x[6:]) * su2acyclic(y[6:]))
+
+    # internal leg change direction
+    if not f1[il1[0]]:
+        pref_funcs.append(lambda x, y: 1 if
+                          (x[il1[0]] + y[il1[0]]) % 2 == 0 else -1)
+    if not f2[il2[0]]:
+        pref_funcs.append(lambda x, y: 1 if
+                          (x[il2[0] + 3] + y[il2[0] + 3]) % 2 == 0 else -1)
+
+    ra = set(range(3)).difference((si[0], il1[0])).pop()
+    rb = set(range(3)).difference((si[1], il2[0])).pop()
+    ri = set(range(3)).difference((il1[1], il2[1])).pop()
+
+    def su2pref(ok, nk, pref_funcs):
+        w9j = wigner9j(ok[ra], ok[si[0]], ok[il1[0]],
+                       ok[si[1] + 3], ok[rb + 3], ok[il2[0] + 3],
+                       nk[il1[1] + 6], nk[il2[1] + 6], ok[ri + 6])
+        pr = (nk[il1[0]] + 1) * (nk[il2[0] + 3] + 1) * w9j
         return reduce(lambda x, y: x * y, [p(ok, nk) for p in pref_funcs], pr)
 
     return {

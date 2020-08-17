@@ -44,21 +44,22 @@ def create_tensors(symmetr):
         'SU(2)': 5,
         'U(1)': 5
     }
-    legs = [make_random_l([mirrep[s] for s in symmetr], 5) for x in range(5)]
+    legs = [make_random_l([mirrep[s] for s in symmetr], 5) for x in range(7)]
     flow = [True, True, False]
     # orthogonalized
-    T, R = make_random_t(symmetr, legs[2:], flow).qr(legs[2][0])
+    T, R = make_random_t(symmetr, legs[4:], flow).qr(legs[4][0])
+    U, R2 = make_random_t(symmetr, legs[:3], flow).qr(legs[2][0])
     # Ortho center
-    S = make_random_t(symmetr, legs[:3], flow) @ R
+    S = (make_random_t(symmetr, legs[2:5], flow) @ R) @ R2
     S *= 1. / S.norm()
-    return S, T
+    return S, T, U
 
 
 class TestTensors:
     def test_QR_OneSite(self, create_tensors):
         """Doing a QR decomposition on a random 1-site tensor
         """
-        S, T = create_tensors
+        S, T, _ = create_tensors
         for leg in S.indexes:
             Q, R = S.qr(leg)
             assert Q.is_ortho(Q.connections(R).pop())
@@ -67,7 +68,7 @@ class TestTensors:
     def test_QR_TwoSite(self, create_tensors):
         """Doing a QR decomposition on a random 2-site tensor
         """
-        S, T = create_tensors
+        S, T, _ = create_tensors
         S = S @ T
         for leg in S.indexes:
             Q, R = S.qr(leg)
@@ -76,7 +77,7 @@ class TestTensors:
     def test_SVD(self, create_tensors):
         """Doing a SVD on a random 2-site tensor
         """
-        S, T = create_tensors
+        S, T, _ = create_tensors
         A = S @ T
         assert len(A.internallegs) == 1
         U, s, V = A.svd(leg=A.internallegs[0])
@@ -86,7 +87,7 @@ class TestTensors:
         assert A.isclose(U @ s @ V)
 
     def test_SvalConsistent(self, create_tensors, helpers):
-        A, B = create_tensors
+        A, B, _ = create_tensors
         R = {leg: A.qr(leg)[1] for leg in A.indexes}
         svalQR = {leg: r.svd(compute_uv=False) for leg, r in R.items()}
 
@@ -114,7 +115,7 @@ class TestTensors:
     def test_Swap0Consistent(self, create_tensors, helpers):
         """Swap of legs of a three-legged tensor
         """
-        A, _ = create_tensors
+        A, _, _ = create_tensors
 
         # Singular values along loose edges
         svals = {leg: A.qr(leg)[1].svd(compute_uv=False) for leg in A.indexes}
@@ -132,7 +133,7 @@ class TestTensors:
             assert A.isclose(B._swap0(0, inv(p)))  # Double swap is the same
 
     def test_Swap1Consistent(self, create_tensors, helpers):
-        A, B = create_tensors
+        A, B, _ = create_tensors
 
         # Singular values along loose edges
         R = {leg: A.qr(leg)[1] for leg in A.indexes}
@@ -159,6 +160,35 @@ class TestTensors:
 
             assert not C.isclose(C2)
             assert C.isclose(C2._swap1(cids, ii))  # Double swap is the same
+
+    def test_Swap2Consistent(self, create_tensors, helpers):
+        A, B, C = create_tensors
+
+        # Singular values along loose edges
+        R = {leg: A.qr(leg)[1] for leg in A.indexes}
+        svalQR = {leg: r.svd(compute_uv=False) for leg, r in R.items()}
+        for X in (B, C):
+            Y = R[A.connections(X).pop()] @ X
+            for leg in set(Y.indexes).intersection(X.indexes):
+                svalQR[leg] = Y.qr(leg)[1].svd(compute_uv=False)
+
+        D = A @ B @ C
+        assert len(D.coupling) == 3
+        cids = (1, 2)
+        ids = [[ii for ii, (c, _) in enumerate(D.coupling[ci])
+                if c not in D.internallegs] for ci in cids]
+
+        for ii in itertools.product(*ids):
+            D2 = D.shallowcopy()._swap2(cids, ii)
+
+            # Checking singular values are consistent
+            for leg in D2.indexes:
+                assert leg in svalQR
+                svclose(D2.qr(leg)[1].svd(compute_uv=False), svalQR[leg],
+                        helpers)
+
+            assert not D.isclose(D2)
+            assert D.isclose(D2._swap2(cids, ii))  # Double swap is the same
 
     def test_adjoint(self, create_tensors, helpers):
         A, B = create_tensors
