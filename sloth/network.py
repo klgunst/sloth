@@ -122,7 +122,7 @@ class TNS(nx.MultiDiGraph):
         """
         self._loose_legs[leg] = (self._loose_legs[leg][0], name)
 
-    def fancy_draw(self, ax=None, node_color=None):
+    def fancy_draw(self, ax=None, node_color=None, grid=None):
         """Does whole bunch of stuff.
 
         Cast the current MultiGraph to a MultiDiGraph
@@ -198,6 +198,21 @@ class TNS(nx.MultiDiGraph):
 
         if node_color is None:
             node_color = color_map
+
+        if grid:
+            plegs = self.lexicographicalPsiteSort()
+            if grid[0] * grid[1] != len(plegs):
+                raise ValueError('The grid should have the dimension of number'
+                                 ' of physical legs')
+            fixed_positions = {}
+            for s in self:
+                pl = set(s.indexes).intersection(plegs)
+                if pl:
+                    pl = pl.pop()
+                    ii = plegs.index(pl)
+                    fixed_positions[s] = (ii % grid[0], ii // grid[0])
+            pos = nx.spring_layout(self, pos=fixed_positions,
+                                   fixed=fixed_positions.keys())
 
         nx.draw(self, pos=pos, ax=ax, node_color=node_color, labels=labels,
                 node_size=[len(s.coupling) * 300 for s in self],
