@@ -1,4 +1,6 @@
 import networkx as nx
+import math
+import itertools
 import numpy as np
 import sloth.symmetries as sls
 
@@ -429,7 +431,7 @@ class Tensor:
         for okey in self:
             for nkey in mappingf(okey):
                 pref = prefactorf(okey, nkey)
-                if np.isclose(pref, 0, atol=1e-12):
+                if math.isclose(pref, 0, rel_tol=0, abs_tol=1e-12):
                     continue
 
                 b = np.multiply(pref, self[okey])
@@ -563,18 +565,45 @@ class Tensor:
         self._coupling = tuple(tuple(c) for c in permute_key(self.coupling))
         f1, f2, fi = ([x[1] for x in self.coupling[c]] for c in (c1, c2, ci))
 
+        # All good interal symmetry sectors in for the swapped 1st coupling
+        nkeys = set(tuple(tuple(e) for e in permute_key(k)) for k in self)
+        c1set = {}
+        r11, r12 = set(range(3)).difference([il1[0]])
+        for k in set(key[c1] for key in nkeys):
+            kn = (k[r11], k[r12])
+            if kn not in c1set:
+                c1set[kn] = set(
+                    sls.allowed_couplings(k, f1, il1[0], self.symmetries))
+        c2set = {}
+        r21, r22 = set(range(3)).difference([il2[0]])
+        for k in set(key[c2] for key in nkeys):
+            kn = (k[r21], k[r22])
+            if kn not in c2set:
+                c2set[kn] = set(
+                    sls.allowed_couplings(k, f2, il2[0], self.symmetries))
+
+        vac = sls.vacuumIrrep(self.symmetries)
+        Z1 = set().union(*c1set.values())
+        Z2 = set().union(*c2set.values())
+        rf = set(range(3)).difference([il1[1], il2[1]]).pop()
+        fit = [fi[rf], fi[il1[1]], fi[il2[1]]]
+        oks = {(k1, k2): set(sls.allowed_couplings((vac, k1, k2),
+                                                   fit, 0, self.symmetries))
+               for k1, k2 in itertools.product(Z1, Z2)}
+
         def mappingf(okey):
             nk = permute_key(okey)
-            # All good interal symmetry sectors in for the swapped 1st coupling
-            x = set(sls.allowed_couplings(nk[c1], f1, il1[0], self.symmetries))
-            y = set(sls.allowed_couplings(nk[c2], f2, il2[0], self.symmetries))
-            for kk1 in x:
-                for kk2 in y:
+            set1 = c1set[(nk[c1][r11], nk[c1][r12])]
+            set2 = c2set[(nk[c2][r21], nk[c2][r22])]
+            for kk1 in set1:
+                for kk2 in set2:
+                    if nk[ci][rf] not in oks[(kk1, kk2)]:
+                        continue
+
                     # Assign the key of the internal leg
                     nk[c1][il1[0]], nk[ci][il1[1]] = kk1, kk1
                     nk[c2][il2[0]], nk[ci][il2[1]] = kk2, kk2
-                    if sls.is_allowed_coupling(nk[ci], fi, self.symmetries):
-                        yield tuple(tuple(e) for e in nk)
+                    yield tuple(tuple(e) for e in nk)
 
         prefdict = sls._prefswap2(iids, il1, il2, f1, f2, fi)
 
@@ -1015,49 +1044,62 @@ class Tensor:
                 return np.prod(
                     [np.sqrt(key[x][y][ii] + 1) for ii in SUid for x, y in mp])
 
+            blockdict = {k: {} for k in Skeys}
+            for k, b in self.items():
+                blockdict[k[lcid[0]][lcid[1]]][k] = \
+                    (b, pref(k, iU), pref(k, iV))
+
             for Skey in Skeys:
+                dict_part = blockdict[Skey]
                 Sprf = np.prod([np.sqrt(Skey[ii] + 1) for ii in SUid])
 
-                dict_part = {k: b for k, b in self.iterate([Skey], [lcid])}
                 Uslice, Ucur = {}, 0
                 Vslice, Vcur = {}, 0
-                for k, b in dict_part.items():
+                for k, (b, Up, Vp) in dict_part.items():
                     Ukey = tuple([k[i] for i in Umap])
                     Vkey = tuple([k[i] for i in Vmap])
 
                     if Ukey not in Uslice:
                         Udims = [b.shape[ii] for ii in Uids]
                         Ud = np.prod(Udims)
-                        Uslice[Ukey] = slice(Ucur, Ucur + Ud), Udims
+                        Uslice[Ukey] = slice(Ucur, Ucur + Ud), Udims, Up
                         Ucur += Ud
                     if Vkey not in Vslice:
                         Vdims = [b.shape[ii] for ii in Vids]
                         Vd = np.prod(Vdims)
-                        Vslice[Vkey] = slice(Vcur, Vcur + Vd), Vdims
+                        Vslice[Vkey] = slice(Vcur, Vcur + Vd), Vdims, Vp
                         Vcur += Vd
 
                 memory = np.zeros((Ucur, Vcur))
 
-                for k, b in dict_part.items():
+                for k, (b, Up, Vp) in dict_part.items():
                     Ukey = tuple([k[i] for i in Umap])
                     Vkey = tuple([k[i] for i in Vmap])
-                    uslice, _ = Uslice[Ukey]
-                    vslice, _ = Vslice[Vkey]
+                    uslice, _, _ = Uslice[Ukey]
+                    vslice, _, _ = Vslice[Vkey]
                     ud = uslice.stop - uslice.start
                     vd = vslice.stop - vslice.start
                     memory[uslice, vslice] = \
-                        np.transpose(b, transp).reshape(ud, vd) / \
-                        pref(Ukey, iU) / pref(Vkey, iV)
+                        np.transpose(b, transp).reshape(ud, vd) / (Up * Vp)
 
                 # Finally do SVD
-                u, s, v = np.linalg.svd(memory, full_matrices=False)
-                S[Skey] = s / Sprf / Sprf
-                for key, (sl, dims) in Uslice.items():
-                    U[key] = u[sl, :].reshape(*dims, -1) * pref(key, iU) * Sprf
-                for key, (sl, dims) in Vslice.items():
-                    V[key] = v[:, sl].reshape(-1, *dims) * pref(key, iV) * Sprf
+                if compute_uv:
+                    u, s, v = np.linalg.svd(memory, full_matrices=False)
+                else:
+                    s = np.linalg.svd(memory, compute_uv=False)
+                    S[Skey] = s / Sprf / Sprf
+                    continue
 
-            return self.truncate_svd(U, S, V, maxD)
+                S[Skey] = s / Sprf / Sprf
+                for key, (sl, dims, Up) in Uslice.items():
+                    U[key] = u[sl, :].reshape(*dims, -1) * Up * Sprf
+                for key, (sl, dims, Vp) in Vslice.items():
+                    V[key] = v[:, sl].reshape(-1, *dims) * Vp * Sprf
+
+            if compute_uv:
+                return self.truncate_svd(U, S, V, maxD)
+            else:
+                return S
         else:
             # Plain svd of a R matrix. Only calculates the singular values
             if len(self.coupling) != 1:

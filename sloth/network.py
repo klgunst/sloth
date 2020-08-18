@@ -472,6 +472,9 @@ class TNS(nx.MultiDiGraph):
         assert lastl in nodo
         assert not plegs.difference(nodo)
         visited = set(nodo)
+        entdict = {k: renyi_entropy(v, alpha) for k, v in
+                   self.calculate_singular_values().items()}
+        legmap = {}
 
         def nextLeg(tns, A):
             cnx = A.get_couplingnetwork()
@@ -502,6 +505,9 @@ class TNS(nx.MultiDiGraph):
         def newMultisite(tns, A, nleg):
             X, Y = tns.nodes_with_leg(nleg)
             tns, A = tns.contracted_nodes(X, Y, simplify=False)
+            nnleg = set(A.internallegs).difference(X.internallegs,
+                                                   Y.internallegs).pop()
+            legmap[nnleg] = legmap.get(nleg, nleg)
 
             if len(A.coupling) >= 3 or len(plegs.intersection(A.indexes)) == 2:
                 return tns, A
@@ -524,6 +530,7 @@ class TNS(nx.MultiDiGraph):
 
             tns, U, S, V = tns.svd(A, il, maxD)
             visited.add(il)
+            entdict[legmap[il]] = renyi_entropy(S, alpha)
             X = U if nleg in U.indexes else V
             X @= S
             assert nleg in X.indexes
@@ -532,15 +539,8 @@ class TNS(nx.MultiDiGraph):
 
         def full_entropy(A):
             assert len(A.coupling) <= 3
-            entanglement = {}
-            for l in A.internallegs:
-                U, S, V = A.svd(leg=l, maxD=maxD)
-                entanglement[l] = renyi_entropy(S, alpha)
-                if len(U.coupling) > 1:
-                    A = U @ S
-                else:
-                    A = V @ S
-            return entanglement
+            return {l: renyi_entropy(A.svd(leg=l, compute_uv=False), alpha)
+                    for l in A.internallegs}
 
         def doSwap(tns, A):
             from random import sample, random
@@ -572,14 +572,14 @@ class TNS(nx.MultiDiGraph):
                 l1, l2 = sample(slist, 1)[0]
 
             Ac = A.shallowcopy().swap(l1, l2)
-            e1 = sum(full_entropy(A).values())
+            # This is an approximation, but faster, do not need to do an SVD
+            e1 = sum(entdict[legmap[ll]] for ll in A.internallegs)
             e2 = sum(full_entropy(Ac).values())
             accepted = False
             P = 0.5 * np.exp(- beta * (e2 - e1))
             if random() < P:
                 accepted = True
-                tnsx = TNS(T for T in tns if T != A)
-                tnsx.add_node(Ac)
+                tnsx = TNS(n if n != A else Ac for n in tns)
                 tnsx.name_loose_edges_from([[ll, name] for ll, (_, name) in
                                            tns._loose_legs.items()])
                 tnsx._orthoCenter = Ac
@@ -600,9 +600,8 @@ class TNS(nx.MultiDiGraph):
         if verbose:
             print()
             print(f"Starting sweep {counter}")
-            ent = sum(renyi_entropy(v, alpha) for v in
-                      tns.calculate_singular_values().values())
-            print(f"Total entanglement: {ent}")
+            print(f"Total entanglement: {sum(entdict.values())}")
+
         while counter < max_sweeps:
             tns, A = newMultisite(tns, A, nleg)
             if pass_interm:
@@ -621,9 +620,9 @@ class TNS(nx.MultiDiGraph):
                 if verbose:
                     print()
                     print(f"Starting sweep {counter}")
-                    ent = sum(renyi_entropy(v, alpha) for v in
-                              tns.calculate_singular_values().values())
-                    print(f"Total entanglement: {ent}")
+                    S = sum(renyi_entropy(v, alpha) for v in
+                            tns.calculate_singular_values().values())
+                    print(f"Total entanglement: {S}, {sum(entdict.values())}")
                 visited = set(nodo)
                 nleg = nextLeg(tns, A)
 

@@ -128,30 +128,31 @@ def _prefswap1(ll, il):
 
 
 def _prefswap2(si, il1, il2, f1, f2, fi):
+    # defining slices
+    sl1 = slice(il1[0] + 1, il1[1] + 6 + f1[il1[0]])
+    sl2 = slice(il2[0] + 4, il2[1] + 6 + f2[il2[0]])
+    sl3 = slice(si[0] + 1, si[1] + 2)
+
     def fpref(okey, nkey):
         # Bring the internals next to each other as <x||x>
-        parity = sum(okey[il1[0] + 1:il1[1] + 6 + f1[il1[0]]]) * okey[il1[0]]
+        parity = sum(okey[sl1]) * okey[il1[0]]
         # Remove internals is equal to setting it to zero
         okey[il1[0]], okey[il1[1] + 6] = 0, 0
 
-        parity += sum(okey[il2[0] + 4:il2[1] + 6 + f2[il2[0]]]) \
-            * okey[il2[0] + 3]
+        parity += sum(okey[sl2]) * okey[il2[0] + 3]
         okey[il2[0] + 3], okey[il2[1] + 6] = 0, 0
 
         # inbetweens, ignoring the removed internal legs
         # Swap the two legs
-        parity += sum(okey[si[0] + 1: si[1] + 3]) \
-            * (okey[si[0]] + okey[si[1] + 3]) + okey[si[0]] * okey[si[1] + 3]
+        parity += sum(okey[sl3]) * (okey[si[0]] + okey[si[1] + 3]) \
+            + okey[si[0]] * okey[si[1] + 3]
 
         # Bring the new internals back to original position
-        parity += sum(nkey[il1[0] + 1:il1[1] + 6 + f1[il1[0]]]) * nkey[il1[0]]
+        parity += sum(nkey[sl1]) * nkey[il1[0]]
         nkey[il1[0]], nkey[il1[1] + 6] = 0, 0
+        parity += sum(nkey[sl2]) * nkey[il2[0] + 3]
 
-        parity += sum(nkey[il2[0] + 4:il2[1] + 6 + f2[il2[0]]]) \
-            * nkey[il2[0] + 3]
-        nkey[il2[0] + 3], nkey[il2[1] + 6] = 0, 0
-
-        return -1. if parity % 2 == 1 else 1.
+        return 1 if parity % 2 == 0 else -1
 
     # Swapping is (j1, j2, j), (j3, j4, j) -> (j1, j3, j), (j2, j4, j)
     # cyclic permutations of each coupling allowed without prefactor,
@@ -161,7 +162,6 @@ def _prefswap2(si, il1, il2, f1, f2, fi):
     # Once this taken into account, use eq. 6j-swap from phd defense
     def su2acyclic(k):
         # Acyclic minus sign for (j1, j2, j3).
-        assert sum(k) % 2 == 0
         return 1. if sum(k) % 4 == 0 else -1.
 
     pref_funcs = []
@@ -385,8 +385,8 @@ def is_allowed_coupling(coupling, flow, symmetries):
         return irreps[0] ^ irreps[1] == irreps[2]
 
     def SU2_constraint(irreps, flow):
-        return (irreps[0] + irreps[1]) >= irreps[2] and \
-            abs(irreps[0] - irreps[1]) <= irreps[2] and sum(irreps) % 2 == 0
+        return sum(irreps) % 2 == 0 and (irreps[0] + irreps[1]) >= irreps[2] \
+            and abs(irreps[0] - irreps[1]) <= irreps[2]
 
     constraint = {
         'fermionic': fermionic_constraint,
