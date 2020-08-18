@@ -1037,8 +1037,8 @@ class Tensor:
             Umap = [self.coupling.index(c) for c in U.coupling]
             Vmap = [self.coupling.index(c) for c in V.coupling]
 
-            iU = [U.coupling_id(c) for c in U.internallegs]
-            iV = [V.coupling_id(c) for c in V.internallegs]
+            iU = [self.coupling_id(c) for c in U.internallegs]
+            iV = [self.coupling_id(c) for c in V.internallegs]
 
             def pref(key, mp):
                 return np.prod(
