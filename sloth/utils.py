@@ -38,11 +38,14 @@ def flatten_svals(svals):
                                    if isinstance(k, tuple)]))[::-1]
 
 
-def renyi_entropy(svals, α=1):
+def renyi_entropy(svals, α=1, kwad=True):
     """Calculates the renyi entropy for a given dictionary of singular values.
     """
     sv = flatten_svals(svals)
-    omega = sv ** 2
+    if kwad:
+        omega = sv ** 2
+    else:
+        omega = sv
     is_zero = np.isclose(sv, np.zeros(sv.shape), atol=1e-32)
     if α == 1:
         V = -omega * np.log(omega, where=np.logical_not(is_zero))

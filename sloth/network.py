@@ -778,8 +778,9 @@ class TNS(nx.MultiDiGraph):
         }
         if not hasattr(alphas, '__iter__'):
             alphas = [alphas]
-        pLentropies = {ll: np.array([renyi_entropy(v, α=a) for a in alphas])
-                       for ll, v in pLsvals.items()}
+        pLentropies = {ll: np.array([
+            renyi_entropy(v, α=a, kwad=not isinstance(ll, tuple))
+            for a in alphas]) for ll, v in pLsvals.items()}
 
         mutualInformation = np.zeros((len(pLegs), len(pLegs), len(alphas)))
         for ii, l1 in enumerate(pLegs):
