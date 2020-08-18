@@ -924,16 +924,18 @@ class Tensor:
         def multplic(key):
             return np.prod([key[i] + 1 for i in su2ids])
 
-        wS = {k: multplic(k) * v for k, v in S.items() if isinstance(k, tuple)}
+        wS = {k: multplic(k) * (v ** 2) for k, v in S.items()
+              if isinstance(k, tuple)}
         sort = np.concatenate([v for k, v in wS.items()])
 
         if len(sort) <= maxD or maxD == 0:
             return U, S, V
 
         Smin = np.sort(sort)[::-1][maxD]
+        scale = 1. / sum(np.sort(sort)[::-1][:maxD])
         for k in list(S):
             if isinstance(k, tuple):
-                S[k] = S[k][wS[k] > Smin]
+                S[k] = S[k][wS[k] > Smin] * scale
                 if len(S[k]) == 0:
                     del S[k]
 

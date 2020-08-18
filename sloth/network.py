@@ -456,6 +456,7 @@ class TNS(nx.MultiDiGraph):
         node_iterator should return the neighbouring nodes to contract every
         step. If none it just sweeps and does whatever it feels like
         """
+        from sloth.utils import renyi_entropy
         if verbose:
             print(f"Disentangling with alpha = {alpha}, beta = {beta}")
 
@@ -530,11 +531,10 @@ class TNS(nx.MultiDiGraph):
             return tns, X
 
         def full_entropy(A):
-            from sloth.utils import renyi_entropy
-
+            assert len(A.coupling) <= 3
             entanglement = {}
             for l in A.internallegs:
-                U, S, V = A.svd(leg=l)
+                U, S, V = A.svd(leg=l, maxD=maxD)
                 entanglement[l] = renyi_entropy(S, alpha)
                 if len(U.coupling) > 1:
                     A = U @ S
@@ -575,7 +575,7 @@ class TNS(nx.MultiDiGraph):
             e1 = sum(full_entropy(A).values())
             e2 = sum(full_entropy(Ac).values())
             accepted = False
-            P = np.exp(- beta * (e2 - e1))
+            P = 0.5 * np.exp(- beta * (e2 - e1))
             if random() < P:
                 accepted = True
                 tnsx = TNS(T for T in tns if T != A)
@@ -588,7 +588,8 @@ class TNS(nx.MultiDiGraph):
             if verbose:
                 print(f'Swapping of {"physical" if Pswap else "virtual "} '
                       f'edges {"accepted" if accepted else "denied  "} with '
-                      f'(P, e1, e2) = ({P:.3f}, {e1:.5f}, {e2:.5f})')
+                      f'(P, e1, e2) = ({min(1, P):.3f}, {e1:.5f}, {e2:.5f})',
+                      flush=True)
 
             return tns, A
 
@@ -596,6 +597,12 @@ class TNS(nx.MultiDiGraph):
         A = tns.sink
         nleg = nextLeg(tns, A)
 
+        if verbose:
+            print()
+            print(f"Starting sweep {counter}")
+            ent = sum(renyi_entropy(v, alpha) for v in
+                      tns.calculate_singular_values().values())
+            print(f"Total entanglement: {ent}")
         while counter < max_sweeps:
             tns, A = newMultisite(tns, A, nleg)
             if pass_interm:
@@ -611,6 +618,12 @@ class TNS(nx.MultiDiGraph):
                 while len(A.coupling) > 1:
                     tns, A = splitMultisite(tns, A, nleg)
                 counter += 1
+                if verbose:
+                    print()
+                    print(f"Starting sweep {counter}")
+                    ent = sum(renyi_entropy(v, alpha) for v in
+                              tns.calculate_singular_values().values())
+                    print(f"Total entanglement: {ent}")
                 visited = set(nodo)
                 nleg = nextLeg(tns, A)
 
