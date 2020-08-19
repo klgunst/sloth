@@ -544,6 +544,7 @@ class Tensor:
             raise ValueError(f'cids: {cids} have {len(ci)} common neighbors')
         ci = self.coupling.index(ci.pop())
 
+        # internal legs
         l1 = cnx.edges[self.coupling[c1], self.coupling[ci], 0]['leg']
         l2 = cnx.edges[self.coupling[c2], self.coupling[ci], 0]['leg']
 
@@ -562,8 +563,8 @@ class Tensor:
             copy = list(list(k) for k in key)
             copy[c1][i1], copy[c2][i2] = copy[c2][i2], copy[c1][i1]
             return copy
-        self._coupling = tuple(tuple(c) for c in permute_key(self.coupling))
         f1, f2, fi = ([x[1] for x in self.coupling[c]] for c in (c1, c2, ci))
+        self._coupling = tuple(tuple(c) for c in permute_key(self.coupling))
 
         # All good interal symmetry sectors in for the swapped 1st coupling
         nkeys = set(tuple(tuple(e) for e in permute_key(k)) for k in self)

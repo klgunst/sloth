@@ -10,11 +10,11 @@ def _prefswap0(permute):
 
     def fpref_213(a, b, c):
         # a and b are odd
-        return -1. if a & 1 and b % 1 else 1.
+        return -1. if a & 1 and b & 1 else 1.
 
     def fpref_132(a, b, c):
         # b and c are odd
-        return -1. if b & 1 and c % 1 else 1.
+        return -1. if b & 1 and c & 1 else 1.
 
     def fpref_321(a, b, c):
         # |1|(|2| + |3|) + |2||3|
@@ -129,11 +129,17 @@ def _prefswap1(ll, il):
 
 def _prefswap2(si, il1, il2, f1, f2, fi):
     # defining slices
+    assert fi[il1[1]] is not f1[il1[0]]
+    assert fi[il2[1]] is not f2[il2[0]]
     sl1 = slice(il1[0] + 1, il1[1] + 6 + f1[il1[0]])
     sl2 = slice(il2[0] + 4, il2[1] + 6 + f2[il2[0]])
-    sl3 = slice(si[0] + 1, si[1] + 2)
+    sl3 = slice(si[0] + 1, si[1] + 3)
 
     def fpref(okey, nkey):
+        assert okey[il1[0]] == okey[il1[1] + 6]
+        assert okey[il2[0] + 3] == okey[il2[1] + 6]
+        assert okey[si[0]] == nkey[si[1] + 3]
+        assert nkey[si[0]] == okey[si[1] + 3]
         # Bring the internals next to each other as <x||x>
         parity = sum(okey[sl1]) * okey[il1[0]]
         # Remove internals is equal to setting it to zero
