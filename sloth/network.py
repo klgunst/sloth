@@ -465,7 +465,8 @@ class TNS(nx.MultiDiGraph):
         return lset, rset
 
     def disentangle(self, onlyPswap=False, max_sweeps=1, maxD=None, alpha=0.25,
-                    beta=20, pass_interm=False, verbose=False):
+                    beta=20, pass_interm=False, verbose=False, slow=False,
+                    rotate=False, **kwargs):
         """General swapping of indexes of two neighbouring tensors.
 
         node_iterator should return the neighbouring nodes to contract every
@@ -557,12 +558,19 @@ class TNS(nx.MultiDiGraph):
             return {l: renyi_entropy(A.svd(leg=l, compute_uv=False), alpha)
                     for l in A.internallegs}
 
+        def sizeof_fmt(num, suffix='B'):
+            for unit in ['', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi']:
+                if abs(num) < 1024.0:
+                    return "%3.1f%s%s" % (num, unit, suffix)
+                num /= 1024.0
+            return "%.1f%s%s" % (num, 'Yi', suffix)
+
         def doSwap(tns, A):
             from random import sample, random
             from itertools import product
             phys = plegs.intersection(A.indexes)
             Pswap = len(phys) == 2
-            if Pswap and onlyPswap:
+            if not Pswap and onlyPswap:
                 # Nothing should happen
                 return tns, A
             assert len(phys) <= 2
@@ -586,25 +594,62 @@ class TNS(nx.MultiDiGraph):
                 slist = list(product(*list(switch.values())))
                 l1, l2 = sample(slist, 1)[0]
 
-            Ac = A.shallowcopy().swap(l1, l2)
-            # This is an approximation, but faster, do not need to do an SVD
-            e1 = sum(entdict[legmap[ll]] for ll in A.internallegs)
-            e2 = sum(full_entropy(Ac).values())
-            accepted = False
-            P = 0.5 * np.exp(- beta * (e2 - e1))
-            if random() < P:
-                accepted = True
-                tnsx = TNS(n if n != A else Ac for n in tns)
-                tnsx.name_loose_edges_from([[ll, name] for ll, (_, name) in
-                                           tns._loose_legs.items()])
-                tnsx._orthoCenter = Ac
-                tns = tnsx
-                A = Ac
-            if verbose:
-                print(f'Swapping of {"physical" if Pswap else "virtual "} '
-                      f'edges {"accepted" if accepted else "denied  "} with '
-                      f'(P, e1, e2) = ({min(1, P):.3f}, {e1:.5f}, {e2:.5f})',
-                      flush=True)
+            if Pswap and rotate:
+                pl = (l1, l2)
+                sample = [(sum(full_entropy(A.rotate(x, pl)).values()), x)
+                          for x in np.arange(-1.6, 1.6, 0.2)]
+                ms = min(sample)
+                result = A.optimizeBasis(pl, alpha=alpha, init=ms[1], **kwargs)
+                if not result.success:
+                    print("Warning: optimization unsuccessful")
+                    print(result)
+                Ac = A.rotate(result.x[0], pl)
+                legmap[Ac.internallegs[0]] = legmap.get(A.internallegs[0],
+                                                        A.internallegs[0])
+
+                e1 = sum(full_entropy(A).values())
+                e2 = sum(full_entropy(Ac).values())
+                assert np.isclose(e2, result.fun)
+
+                accepted = False
+                if e2 < e1:
+                    accepted = True
+                    tnsx = TNS(n if n != A else Ac for n in tns)
+                    tnsx.name_loose_edges_from([[ll, name] for ll, (_, name) in
+                                                tns._loose_legs.items()])
+                    tnsx._orthoCenter = Ac
+                    tns = tnsx
+                    A = Ac
+                if verbose:
+                    print(f'Rotation {"accepted" if accepted else "denied  "} '
+                          'of physical edges  with (theta, e1, e2) = '
+                          f'({result.x[0]:.5f}, {e1:.5f}, {e2:.5f}) '
+                          f'sizeof(A)={sizeof_fmt(A.size * 8)} '
+                          f' sizeof(Ac)={sizeof_fmt(Ac.size * 8)}', flush=True)
+                return tns, A
+            else:
+                Ac = A.shallowcopy().swap(l1, l2)
+                if slow:
+                    e1 = sum(full_entropy(A).values())
+                else:
+                    e1 = sum(entdict[legmap[ll]] for ll in A.internallegs)
+                e2 = sum(full_entropy(Ac).values())
+                accepted = False
+                P = 0.5 * np.exp(- beta * (e2 - e1))
+                if random() < P:
+                    accepted = True
+                    tnsx = TNS(n if n != A else Ac for n in tns)
+                    tnsx.name_loose_edges_from([[ll, name] for ll, (_, name) in
+                                               tns._loose_legs.items()])
+                    tnsx._orthoCenter = Ac
+                    tns = tnsx
+                    A = Ac
+                if verbose:
+                    print(f'Swapping of {"physical" if Pswap else "virtual "} '
+                          f'edges {"accepted" if accepted else "denied  "} '
+                          f'with (P, e1, e2) = ({min(1, P):.3f}, {e1:.5f}, '
+                          f'{e2:.5f}) sizeof(A)={sizeof_fmt(A.size * 8)} '
+                          f' sizeof(Ac)={sizeof_fmt(Ac.size * 8)}', flush=True)
 
             return tns, A
 
@@ -1145,7 +1190,7 @@ def read_h5(filename):
     bonds = np.array(h5file['network']['bonds']).reshape(-1, 2)
 
     # make the virtual legs
-    vlegs = [Leg(vacuum=x == -1) for x, _ in bonds]
+    vlegs = [Leg() for x, _ in bonds]
     plegs = [Leg() for i in range(h5file['network'].attrs['psites'].item())]
 
     sitetoorb = h5file['network']['sitetoorb']

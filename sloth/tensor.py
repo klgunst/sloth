@@ -1,7 +1,7 @@
 import networkx as nx
 import math
-import itertools
 import numpy as np
+import itertools
 import sloth.symmetries as sls
 
 _SYMMETRIES = ['fermionic', 'U(1)', 'SU(2)', 'C1', 'Ci', 'C2', 'Cs', 'D2',
@@ -939,7 +939,7 @@ class Tensor:
 
             # moving back all the blocks into the original tensor
             for (block, pref), x in zip(blocks, np.split(q, Aspl)):
-                new_shape = np.array(self[block].shape)[transp]
+                new_shape = [self[block].shape[x] for x in transp]
                 assert new_shape[-1] == ldim
                 new_shape[-1] = newlead
                 Q[block] = pref * lpref * \
@@ -1232,3 +1232,193 @@ class Tensor:
             return self._swap2(*[x for x in zip(*cids)])
         else:
             raise NotImplementedError
+
+    def swapCouplingTuples(self, permutation):
+        """Swaps whole tuples of the coupling according to the permutation.
+        """
+        from collections import Counter
+
+        if Counter(permutation) != Counter(range(len(self.coupling))):
+            raise ValueError(f'Permutation {permutation} is not valid')
+
+        def permute_key(key):
+            return tuple(key[p] for p in permutation)
+
+        self._coupling = permute_key(self.coupling)
+
+        def mappingf(okey):
+            yield permute_key(okey)
+
+        self._manipulate_coupling(mappingf, lambda x, y: 1)
+        return self
+
+    def couplingAddapt(self, ncoupling):
+        """Addapts the coupling of self to ncoupling if possible,
+        else raises a ValueErorr.
+        """
+        from collections import Counter
+        if Counter(y for x in self.coupling for y in x) \
+                != Counter(y for x in ncoupling for y in x):
+            raise ValueError('Couplings are not mutable into each other')
+
+        # Reorder such the internal legs belong to corresp couplings
+        permutation = [set([(l, f) in c for c in self.coupling].index(True)
+                           for l, f in C if l in self.internallegs)
+                       for C in ncoupling]
+
+        if [len(x) for x in permutation] != [True] * len(permutation):
+            raise ValueError('Couplings are not mutable into each other')
+        self.swapCouplingTuples([x.pop() for x in permutation])
+
+        # First set all the free legs on the right couplings
+        ncl = tuple(tuple(x for x, y in c) for c in ncoupling)
+        nl = self.get_legs()
+        swapping = {l: (
+            [l in c for c in ncl].index(True), [l in c for c in nl].index(True)
+        ) for l in self.indexes}
+        # Remove the legs that do not need a swapping
+        swapping = {l: v for l, v in swapping.items() if v[0] != v[1]}
+
+        # while swapping is not empty
+        while swapping:
+            assert len(swapping) % 2 == 0
+            l1, swap = swapping.popitem()
+            l2 = None
+            for k, v in swapping.items():
+                if v[0] == swap[1]:
+                    # This is a good leg to swap with
+                    l2 = k
+                if v[1] == swap[0]:
+                    # This is a very good leg to swap with
+                    break
+            assert l2 is not None
+            self.swap(l1, l2)
+            del swapping[l2]
+        assert len(swapping) == 0
+
+        # All legs are assigned to the right coupling at this point
+        # Permute every coupling!
+        for ii, (c1, c2) in enumerate(zip(self.coupling, ncoupling)):
+            assert Counter(c1) == Counter(c2)  # They are equivalent
+            self._swap0(ii, [c1.index(x) for x in c2])
+
+        assert [y for x in self.coupling for y in x] \
+            == [y for x in ncoupling for y in x]
+        return self
+
+    def optimizeBasis(self, legs, alpha=1., init=0., tol=1e-6):
+        """Optimizes the two-site tensor with respect to two given physical
+        legs.
+        """
+        from scipy.optimize import minimize
+        from sloth.utils import renyi_entropy
+
+        def entanglement(theta):
+            from sloth.utils import flatten_svals
+            A = self.rotate(theta[0], legs)
+            S = A.svd(leg=A.internallegs[0], compute_uv=False)
+            entropy = renyi_entropy(S, alpha)
+            assert np.isclose(np.linalg.norm(flatten_svals(S)), 1.)
+            return entropy
+
+        res = minimize(entanglement, np.array(init), tol=tol,
+                       bounds=[(-1.6, 1.6)])
+        return res
+
+    def rotate(self, theta, legs):
+        """Rotates the physical legs (does not check if it is really a physical
+        leg or not.
+        """
+        U, onew = rotationTensor(theta, self.symmetries, legs)
+        B = U @ self
+        new = list(onew)
+        old = list(legs)
+        if B.internallegs != self.internallegs:
+            old.append(self.internallegs[0])
+            new.append(B.internallegs[0])
+        B.swaplegs({n: o for o, n in zip(old, new)})
+        return B.couplingAddapt(self.coupling)
+
+
+def rotationTensor(theta, symmetries, pl):
+    from math import cos, sin
+
+    if tuple(symmetries) != ('fermionic', 'U(1)', 'U(1)') and \
+            tuple(symmetries) != ('fermionic', 'U(1)', 'SU(2)'):
+        raise NotImplementedError(
+            f'rotation Tensor not implemented for {symmetries}')
+
+    ct, st = cos(theta), sin(theta)
+    npl = [Leg(leg=l) for l in pl]
+    il = Leg()
+    U = Tensor(symmetries,
+               coupling=(((npl[0], True), (npl[1], True), (il, False)),
+                         ((il, True), (pl[1], False), (pl[0], False))))
+
+    def valuesU1():
+        # Occupations of one spatial orbital in U(1) x U(1)
+        e, u, d, f = (0, 0, 0), (1, 1, 0), (1, 0, 1), (0, 1, 1)
+        u2, d2, f2 = (0, 2, 0), (0, 0, 2), (0, 2, 2)
+        fu, fd = (1, 2, 1), (1, 1, 2)
+        return {
+            ((e, e, e), (e, e, e)): 1.,
+            ((f, f, f2), (f2, f, f)): 1.,
+            ((u, u, u2), (u2, u, u)): 1.,
+            ((d, d, d2), (d2, d, d)): 1.,
+
+            ((u, e, u), (u, e, u)): ct,
+            ((d, e, d), (d, e, d)): ct,
+            ((e, u, u), (u, u, e)): ct,
+            ((e, d, d), (d, d, e)): ct,
+            ((u, e, u), (u, u, e)): st,
+            ((d, e, d), (d, d, e)): st,
+            ((e, u, u), (u, e, u)): -st,
+            ((e, d, d), (d, e, d)): -st,
+
+            ((f, u, fu), (fu, u, f)): ct,
+            ((f, d, fd), (fd, d, f)): ct,
+            ((u, f, fu), (fu, f, u)): ct,
+            ((d, f, fd), (fd, f, d)): ct,
+            ((u, f, fu), (fu, u, f)): st,
+            ((d, f, fd), (fd, d, f)): st,
+            ((f, u, fu), (fu, f, u)): -st,
+            ((f, d, fd), (fd, f, d)): -st,
+
+            ((f, e, f), (f, e, f)): ct * ct,
+            ((f, e, f), (f, d, u)): ct * st,
+            ((f, e, f), (f, u, d)): -ct * st,
+            ((f, e, f), (f, f, e)): st * st,
+
+            ((e, f, f), (f, f, e)): ct * ct,
+            ((e, f, f), (f, u, d)): ct * st,
+            ((e, f, f), (f, d, u)): -ct * st,
+            ((e, f, f), (f, e, f)): st * st,
+
+            ((u, d, f), (f, d, u)): ct * ct,
+            ((u, d, f), (f, u, d)): st * st,
+            ((u, d, f), (f, e, f)): -ct * st,
+            ((u, d, f), (f, f, e)): ct * st,
+
+            ((d, u, f), (f, u, d)): ct * ct,
+            ((d, u, f), (f, d, u)): st * st,
+            ((d, u, f), (f, e, f)): ct * st,
+            ((d, u, f), (f, f, e)): -ct * st,
+        }
+
+    def valuesSU2():
+        # Occupations of one spatial orbital in U(1) x SU(2)
+        raise NotImplementedError
+        # e, s, f = (0, 0, 0), (1, 1, 1), (0, 2, 0)
+
+    if tuple(symmetries) == ('fermionic', 'U(1)', 'U(1)'):
+        values = valuesU1()
+    elif tuple(symmetries) == ('fermionic', 'U(1)', 'SU(2)'):
+        values = valuesSU2()
+    else:
+        raise NotImplementedError(
+            f'rotation Tensor not implemented for {symmetries}')
+
+    for k, v in values.items():
+        U[k] = np.array(v, ndmin=4)
+
+    return U, npl
