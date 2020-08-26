@@ -214,9 +214,48 @@ class TNS(nx.MultiDiGraph):
             pos = nx.spring_layout(self, pos=fixed_positions,
                                    fixed=fixed_positions.keys())
 
-        nx.draw(self, pos=pos, ax=ax, node_color=node_color, labels=labels,
-                node_size=[len(s.coupling) * 300 for s in self],
-                with_labels=True)
+        # Markers:
+        markers = 'osdp^><v'
+        irreps = {p: self.getIrrepPleg(p) for p in self.getPhysicalLegs()}
+        node_shape = [
+            markers[irreps[set(n.indexes).intersection(irreps).pop()]]
+            if set(n.indexes).intersection(irreps) else 'o' for n in self
+        ]
+        for m in set(node_shape):
+            nl = [n for mm, n in zip(node_shape, self) if mm == m]
+            nc = [n for mm, n in zip(node_shape, node_color) if mm == m]
+            ns = [len(n.coupling) * 400 for mm, n in zip(node_shape, self)
+                  if mm == m]
+            nx.draw_networkx_nodes(self, pos=pos, ax=ax, nodelist=nl,
+                                   node_color=nc, node_shape=m, node_size=ns)
+
+        nx.draw_networkx_edges(self, pos=pos, ax=ax)
+        nx.draw_networkx_labels(self, pos=pos, ax=ax, labels=labels)
+
+    def getIrrepPleg(self, pleg):
+        """Returns the irrep in number to which the orbital belongs
+        """
+        if pleg not in self.getPhysicalLegs():
+            return ValueError('Given leg is not a physical leg of the network')
+
+        PGs = ['C1', 'Ci', 'C2', 'Cs', 'D2', 'C2v', 'C2h', 'D2h']
+        A = self._loose_legs[pleg][0]
+        PGA = set(PGs).intersection(A.symmetries)
+        if not PGA:
+            return 0
+        if len(PGA) != 1:
+            raise ValueError('The given tensor has multiple '
+                             'point group symmetries assigned.')
+        ii, jj = A.coupling_id(pleg)
+        kk = A.symmetries.index(PGA.pop())
+        keys = set(k[ii][jj][kk] for k in A)
+
+        keys.remove(0)
+        assert len(keys) < 2
+        if keys:
+            return keys.pop()
+        else:
+            return 0
 
     def getPhysicalLegs(self):
         return set(k for k, (_, name) in self._loose_legs.items()
