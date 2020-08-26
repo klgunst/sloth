@@ -984,16 +984,13 @@ class TNS(nx.MultiDiGraph):
             Ai = sites.index(A)
             if len(list(self.predecessors(A))) == 0:
                 bonds.append([-1, Ai])
-                assert A.coupling[0][0][0].vacuum
             successors = set(self.successors(A))
             if successors:
                 assert len(successors) == 1
                 bonds.append([Ai, sites.index(successors.pop())])
-                assert not A.coupling[0][2][0].vacuum
             else:
                 assert A == self.sink
                 bonds.append([Ai, -1])
-                assert not A.coupling[0][2][0].vacuum
         h5n['bonds'] = np.array(bonds, dtype=np.int32).ravel()
         h5n.attrs['nr_bonds'] = [np.int32(len(bonds))]
 

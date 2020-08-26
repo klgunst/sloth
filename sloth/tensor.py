@@ -1306,7 +1306,7 @@ class Tensor:
             == [y for x in ncoupling for y in x]
         return self
 
-    def optimizeBasis(self, legs, alpha=1., init=0., tol=1e-6):
+    def optimizeBasis(self, legs, alpha=1., init=0., tol=1e-6, verbose=False):
         """Optimizes the two-site tensor with respect to two given physical
         legs.
         """
@@ -1318,7 +1318,11 @@ class Tensor:
             A = self.rotate(theta[0], legs)
             S = A.svd(leg=A.internallegs[0], compute_uv=False)
             entropy = renyi_entropy(S, alpha)
-            assert np.isclose(np.linalg.norm(flatten_svals(S)), 1.)
+            if verbose:
+                print(f"S(theta={theta}) = {entropy}")
+            normsv = np.linalg.norm(flatten_svals(S))
+            if not np.isclose(normsv, 1.):
+                print(f"Error on singular values of {abs(1 - normsv)}")
             return entropy
 
         res = minimize(entanglement, np.array(init), tol=tol,
