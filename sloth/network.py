@@ -54,7 +54,9 @@ class TNS(nx.MultiDiGraph):
         return set(x[-1] for x in self.edges(data='leg'))
 
     @property
-    def max_bondDimsension(self):
+    def maxDim(self):
+        """The maximal bond dimension in the network
+        """
         return max(max(A.shape) for A in self)
 
     @property
