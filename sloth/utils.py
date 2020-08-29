@@ -57,8 +57,8 @@ def renyi_entropy(svals, α=1, kwad=True):
         return np.log(spomega, where=np.logical_not(is_zero)) / (1 - α)
 
 
-def simAnnealing(Iij, Dij, iterations=1000, β=1, initstate=None,
-                 swappairs=None):
+def simAnnealing(Iij, Dij, iterations=1000, beta=1, initstate=None,
+                 swappairs=None, showprogress=False):
     from random import sample, random
     assert Iij.shape == Dij.shape and Iij.shape[0] == Iij.shape[1]
 
@@ -82,8 +82,22 @@ def simAnnealing(Iij, Dij, iterations=1000, β=1, initstate=None,
         else:
             return sample(swappairs, 1)[0]
 
+    def printProgressBar(iteration, total, prefix='', suffix='',
+                         decimals=1, length=50, fill='█'):
+        # Call in a loop to create terminal progress bar
+        # stackoverflow.com/questions/3173320/text-progress-bar-in-the-console
+        percent = ("{0:." + str(decimals) + "f}").format(
+            100 * (iteration / float(total)))
+        filledLength = int(length * iteration // total)
+        bar = fill * filledLength + '-' * (length - filledLength)
+        print('\r%s |%s| %s%% %s' % (prefix, bar, percent, suffix), end='\r')
+        # Print New Line on Complete
+        if iteration == total:
+            print()
+
     currstate, beststate = list(initstate), list(initstate)
     ocost, bestcost = (costfunction(currstate),) * 2
+    modul = max(iterations // 200, 1)
 
     for it in range(iterations):
         while True:
@@ -92,7 +106,7 @@ def simAnnealing(Iij, Dij, iterations=1000, β=1, initstate=None,
             currstate[i], currstate[j] = currstate[j], currstate[i]
             ncost = costfunction(currstate)
 
-            if ncost < ocost or random() < np.exp(-β * (ncost - ocost)):
+            if ncost < ocost or random() < np.exp(-beta * (ncost - ocost)):
                 # swap is accepted
                 ocost = ncost
                 # new best state
@@ -102,4 +116,7 @@ def simAnnealing(Iij, Dij, iterations=1000, β=1, initstate=None,
                 break
             # swap is not accepted, redo swap
             currstate[i], currstate[j] = currstate[j], currstate[i]
+        if showprogress and (it + 1) % modul == 0:
+            printProgressBar(it + 1, iterations,
+                             suffix="Cost: {0:9.4g}".format(bestcost))
     return beststate, bestcost
